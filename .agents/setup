@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Orb setup for rust-researcher.
+#
+# Installs the toolchain the accepted design depends on (docs/decisions.md):
+# Rust stable with clippy and rustfmt, sqlx-cli for migrations, SQLite, and
+# prettier for the docs formatting recipe. Docling and the PDF renderer are
+# scheduled after the first slice and are deliberately not installed here.
+#
+# Idempotent: every step checks before it installs, so a stale snapshot runs
+# in seconds. Never runs a server or waits on anything interactive.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+export DEBIAN_FRONTEND=noninteractive
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export PATH="$CARGO_HOME/bin:$PATH"
+
+step() { printf '\n==> %s (%s)\n' "$1" "$(date +%H:%M:%S)"; }
+
+# ---------------------------------------------------------------------------
+step "System packages"
+# build-essential/pkg-config/libssl-dev: reqwest, sqlx, and most -sys crates.
+# sqlite3/libsqlite3-dev: the database and the sqlx sqlite feature.
+apt_pkgs=(build-essential pkg-config libssl-dev sqlite3 libsqlite3-dev ca-certificates curl)
+missing=()
+for p in "${apt_pkgs[@]}"; do
+  dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+done
+if ((${#missing[@]})); then
+  echo "installing: ${missing[*]}"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq --no-install-recommends "${missing[@]}"
+else
+  echo "all present"
+fi
+
+# ---------------------------------------------------------------------------
+step "Rust toolchain"
+# rust-toolchain.toml pins the channel and components; rustup installs it on
+# first use. --no-modify-path: PATH is persisted explicitly below.
+if ! command -v rustup >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+fi
+# Installs the pinned toolchain (and its components) if not already present.
+rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+rustc --version
+cargo --version
+
+# ---------------------------------------------------------------------------
+step "cargo-binstall and sqlx-cli"
+# binstall fetches prebuilt binaries; compiling sqlx-cli from source takes
+# several minutes and would push setup toward its limit.
+if ! command -v cargo-binstall >/dev/null 2>&1; then
+  curl -L --proto '=https' --tlsv1.2 -sSf \
+    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
+    | bash
+fi
+if ! command -v sqlx >/dev/null 2>&1; then
+  cargo binstall --no-confirm sqlx-cli
+fi
+sqlx --version
+
+# ---------------------------------------------------------------------------
+step "prettier (docs formatting recipe)"
+if ! command -v prettier >/dev/null 2>&1; then
+  npm install -g --silent prettier@3
+fi
+prettier --version
+
+# ---------------------------------------------------------------------------
+step "Persist PATH for login shells"
+# Amp and supervised services start from a login shell; rustup's own profile
+# edit was disabled above so this is the single place PATH is set.
+marker="# rust-researcher: cargo bin"
+if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<EOF
+
+$marker
+case ":\$PATH:" in
+  *":\$HOME/.cargo/bin:"*) ;;
+  *) export PATH="\$HOME/.cargo/bin:\$PATH" ;;
+esac
+EOF
+fi
+
+# ---------------------------------------------------------------------------
+step "Cargo dependencies"
+# No Cargo.toml exists yet (design phase). When the crate lands this fetches
+# its lockfile so the snapshot carries the registry cache.
+if [ -f Cargo.toml ]; then
+  cargo fetch --locked
+else
+  echo "no Cargo.toml yet; skipping"
+fi
+
+# ---------------------------------------------------------------------------
+step "Orb guidance for agents"
+mkdir -p "$HOME/.config/amp"
+guidance="$HOME/.config/amp/AGENTS.md"
+gmarker="# rust-researcher orb notes"
+if ! grep -Fqx "$gmarker" "$guidance" 2>/dev/null; then
+  cat >>"$guidance" <<'EOF'
+
+# rust-researcher orb notes
+
+- Rust stable, clippy, rustfmt, `sqlx` CLI, `sqlite3`, and `prettier@3` are preinstalled by `.agents/setup`.
+- Format docs with `prettier --write --prose-wrap always docs/*.md README.md` before committing; the existing docs are prettier-clean.
+- Decisions live in `docs/decisions.md`; a change to an accepted number or choice is a new dated entry there, not a silent edit.
+- Docling and the PDF renderer are not installed; they are scheduled after the first slice (architecture §10).
+EOF
+fi
+
+step "Done"

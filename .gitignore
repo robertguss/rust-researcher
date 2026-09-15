@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# Amp orb portal registrations (per-orb, never committed)
+.amp/portals/*
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example

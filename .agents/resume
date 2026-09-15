@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Runs every time an orb wakes. Nothing to authenticate or reconnect yet;
+# this only confirms the toolchain that setup installed is still on PATH so a
+# broken snapshot is reported instead of discovered mid-task.
+set -euo pipefail
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+for tool in cargo sqlx sqlite3 prettier; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "resume: $tool missing; rerun .agents/setup" >&2
+    exit 1
+  fi
+done
+echo "resume: toolchain present ($(rustc --version))"
