@@ -95,11 +95,12 @@ pub async fn create(
             .await?;
         }
         sqlx::query(
-            "INSERT INTO runs (id,brief_json,mode,backend,backend_contract_version,depth,max_duration_seconds,max_cost_microusd,accept_weaker_limits,follow_up_of,context_version,instruction_version,execution,completeness,review,label,notification,external,created_at,updated_at) VALUES (?,?, 'managed',?,?,?,?,?,?,?,?,?,'queued','none','structural','draft','pending','none',?,?)",
+            "INSERT INTO runs (id,brief_json,mode,backend,backend_config_json,backend_contract_version,depth,max_duration_seconds,max_cost_microusd,accept_weaker_limits,follow_up_of,context_version,instruction_version,execution,completeness,review,label,notification,external,created_at,updated_at) VALUES (?,?, 'managed',?,?,?,?,?,?,?,?,?,?,'queued','none','structural','draft','pending','none',?,?)",
         )
         .bind(&run_id)
         .bind(serde_json::to_string(&request.brief)?)
         .bind(&request.backend)
+        .bind(serde_json::to_string(&request.backend_config)?)
         .bind(CONTRACT_VERSION)
         .bind(depth_name(&request.brief.depth))
         .bind(request.max_duration_seconds.map(|value| value as i64))

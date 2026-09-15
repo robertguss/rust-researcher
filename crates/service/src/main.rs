@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
         research_service::live_exa_from_env()?,
     )
     .await?;
+    tokio::spawn(research_service::worker::run(state.clone()));
     let address: SocketAddr = std::env::var("RESEARCH_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse()?;

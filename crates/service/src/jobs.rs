@@ -99,6 +99,27 @@ pub async fn complete(pool: &SqlitePool, claim: &JobClaim) -> Result<(), AppErro
     Ok(())
 }
 
+pub async fn fail(pool: &SqlitePool, claim: &JobClaim, error: &str) -> Result<(), AppError> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let changed = sqlx::query("UPDATE jobs SET state='failed',error_json=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND state='running' AND attempt_epoch=?")
+        .bind(serde_json::json!({"message": error}).to_string())
+        .bind(&now)
+        .bind(&claim.id)
+        .bind(claim.attempt_epoch)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    require_fence(changed)?;
+    sqlx::query("UPDATE runs SET execution='failed',external=CASE WHEN external='none' THEN 'none' ELSE 'terminal' END,updated_at=? WHERE id=?")
+        .bind(&now)
+        .bind(&claim.run_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn reclaim_expired(pool: &SqlitePool) -> Result<u64, AppError> {
     let now = Utc::now().to_rfc3339();
     let mut tx = pool.begin().await?;

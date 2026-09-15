@@ -4,6 +4,31 @@ use serde_json::{Value, json};
 
 use crate::error::AppError;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentRun {
+    pub id: String,
+    pub status: String,
+    #[serde(rename = "stopReason")]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub output: Value,
+    #[serde(rename = "costDollars", default)]
+    pub cost_dollars: Value,
+}
+
+impl AgentRun {
+    pub fn reported_cost_microusd(&self) -> Option<i64> {
+        self.cost_dollars
+            .get("total")
+            .and_then(Value::as_f64)
+            .map(|dollars| (dollars * 1_000_000.0).round() as i64)
+    }
+
+    pub fn terminal(&self) -> bool {
+        matches!(self.status.as_str(), "completed" | "failed" | "cancelled")
+    }
+}
+
 #[derive(Debug)]
 pub struct ProviderResponse<T> {
     pub value: T,
@@ -24,6 +49,27 @@ pub trait ExaProvider: Send + Sync {
         result_count: u32,
     ) -> Result<ProviderResponse<Vec<SearchResult>>, AppError>;
     async fn contents(&self, url: &str) -> Result<ProviderResponse<Option<ExaContent>>, AppError>;
+    async fn create_agent_run(&self, request: Value) -> Result<AgentRun, AppError> {
+        let _ = request;
+        Err(AppError::validation(
+            "agent_not_supported",
+            "provider does not support Exa Agent",
+        ))
+    }
+    async fn get_agent_run(&self, id: &str) -> Result<AgentRun, AppError> {
+        let _ = id;
+        Err(AppError::validation(
+            "agent_not_supported",
+            "provider does not support Exa Agent",
+        ))
+    }
+    async fn cancel_agent_run(&self, id: &str) -> Result<AgentRun, AppError> {
+        let _ = id;
+        Err(AppError::validation(
+            "agent_not_supported",
+            "provider does not support Exa Agent",
+        ))
+    }
 }
 
 pub struct HttpExaProvider {
@@ -60,6 +106,28 @@ impl HttpExaProvider {
             });
         }
         Ok(response.json().await?)
+    }
+
+    async fn get(&self, path: &str) -> Result<Value, AppError> {
+        let response = self
+            .client
+            .get(format!("{}{path}", self.base_url.trim_end_matches('/')))
+            .header("x-api-key", &self.api_key)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(exa_http_error(response.status()));
+        }
+        Ok(response.json().await?)
+    }
+}
+
+fn exa_http_error(status: reqwest::StatusCode) -> AppError {
+    AppError::Client {
+        status: axum::http::StatusCode::BAD_GATEWAY,
+        code: "exa_error",
+        message: format!("Exa returned HTTP {status}"),
+        retryable: status.is_server_error() || status.as_u16() == 429,
     }
 }
 
@@ -130,5 +198,24 @@ impl ExaProvider for HttpExaProvider {
             value: content,
             reported_cost_microusd: reported_cost(&value),
         })
+    }
+
+    async fn create_agent_run(&self, request: Value) -> Result<AgentRun, AppError> {
+        Ok(serde_json::from_value(
+            self.post("/agent/runs", request).await?,
+        )?)
+    }
+
+    async fn get_agent_run(&self, id: &str) -> Result<AgentRun, AppError> {
+        Ok(serde_json::from_value(
+            self.get(&format!("/agent/runs/{id}")).await?,
+        )?)
+    }
+
+    async fn cancel_agent_run(&self, id: &str) -> Result<AgentRun, AppError> {
+        Ok(serde_json::from_value(
+            self.post(&format!("/agent/runs/{id}/cancel"), json!({}))
+                .await?,
+        )?)
     }
 }

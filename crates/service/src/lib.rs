@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod reports;
 pub mod runs;
 pub mod store;
+pub mod worker;
 
 use axum::{
     Json, Router,
@@ -408,13 +409,22 @@ async fn backends(
 ) -> Result<Json<Vec<BackendContract>>, AppError> {
     authenticate(&headers, &state)?;
     let capabilities = BTreeMap::from([
-        ("citations".into(), "with_passages".into()),
-        ("cost_reporting".into(), "aggregate".into()),
+        ("deadline".into(), "best_effort".into()),
+        ("cost_cap".into(), "hard".into()),
+        ("cancellation".into(), "unverified".into()),
+        ("cost_reporting".into(), "per_run".into()),
+        ("citations".into(), "urls_only".into()),
+        ("mid_run_clarification".into(), "unsupported".into()),
+        ("resume".into(), "none".into()),
         ("structured_output".into(), "schema".into()),
+        ("partial_output".into(), "unverified".into()),
+        ("result_retention".into(), "unverified".into()),
+        ("submission_idempotency".into(), "none".into()),
+        ("privacy_mode".into(), "unverified".into()),
     ]);
     Ok(Json(vec![BackendContract {
-        name: "exa-search-and-contents".into(),
-        adapter_version: "v1".into(),
+        name: "exa-agent".into(),
+        adapter_version: "2026-09-15.1".into(),
         capabilities,
     }]))
 }

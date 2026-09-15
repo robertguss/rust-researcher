@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use axum::{
     Router,
     body::{Body, to_bytes},
+    extract::State,
     http::{Request, StatusCode},
     routing::post,
 };
@@ -15,6 +16,7 @@ use std::{
     sync::Arc,
 };
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use crate::{
@@ -592,4 +594,108 @@ async fn expired_paid_submission_requires_reconciliation_not_retry() {
     assert_eq!(resolved.execution, "failed");
     assert_eq!(resolved.blocked_reason, None);
     assert_eq!(resolved.external, "terminal");
+}
+
+#[tokio::test]
+async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
+    #[derive(Clone)]
+    struct FakeAgent {
+        create_body: Arc<Mutex<Option<Value>>>,
+        polls: Arc<Mutex<u32>>,
+    }
+    async fn create(
+        State(state): State<FakeAgent>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        *state.create_body.lock().await = Some(body);
+        axum::Json(json!({
+            "id": "agent_run_fake",
+            "status": "running",
+            "stopReason": null,
+            "output": {"text": "", "structured": null, "grounding": []},
+            "costDollars": {"total": 0.0}
+        }))
+    }
+    async fn get(State(state): State<FakeAgent>) -> axum::Json<Value> {
+        *state.polls.lock().await += 1;
+        axum::Json(json!({
+            "id": "agent_run_fake",
+            "status": "completed",
+            "stopReason": "schema_satisfied",
+            "output": {
+                "text": "A collected answer",
+                "structured": null,
+                "grounding": [{"field": "text", "citations": [{"url": "https://example.com"}]}]
+            },
+            "costDollars": {"total": 0.025}
+        }))
+    }
+
+    let fake = FakeAgent {
+        create_body: Arc::new(Mutex::new(None)),
+        polls: Arc::new(Mutex::new(0)),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn({
+        let fake = fake.clone();
+        async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/agent/runs", post(create))
+                    .route("/agent/runs/{id}", axum::routing::get(get))
+                    .with_state(fake),
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let provider =
+        Arc::new(HttpExaProvider::new("fake-key".into(), format!("http://{address}")).unwrap());
+    let (_directory, state) = test_state(provider).await;
+    let mut request = managed_request("Find the supported answer");
+    request.backend_config = json!({"effort": "low"});
+    let run = crate::runs::create(&state.pool, "agent-worker", request)
+        .await
+        .unwrap();
+    assert!(
+        crate::worker::process_one(&state, "test-worker")
+            .await
+            .unwrap()
+    );
+
+    let current = crate::runs::get(&state.pool, &run.id).await.unwrap();
+    assert_eq!(current.execution, "succeeded");
+    assert_eq!(current.external, "terminal");
+    let stored: (String, i64, String) = sqlx::query_as(
+        "SELECT status,reported_microusd,output_path FROM provider_runs WHERE run_id=?",
+    )
+    .bind(&run.id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "completed");
+    assert_eq!(stored.1, 25_000);
+    assert!(
+        state
+            .artifacts
+            .read(&stored.2)
+            .await
+            .unwrap()
+            .starts_with(b"{")
+    );
+    let spend: (String, i64) =
+        sqlx::query_as("SELECT state,reported_microusd FROM spend WHERE operation_id=?")
+            .bind(&run.id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(spend, ("reconciled".into(), 25_000));
+    let sent = fake.create_body.lock().await.clone().unwrap();
+    assert_eq!(sent["query"], "Find the supported answer");
+    assert_eq!(sent["effort"], "low");
+    assert!(sent.get("budget").is_none());
+    assert_eq!(*fake.polls.lock().await, 1);
+    server.abort();
 }
