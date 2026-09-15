@@ -643,7 +643,7 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             "output": {
                 "text": "A collected answer",
                 "structured": {
-                    "answerMarkdown": "A collected answer",
+                    "answerMarkdown": "A collected answer<script>alert('x')</script>\n\n| Option | Cost |\n|---|---:|\n| Example | $10 |",
                     "claims": [
                         {
                             "id": "fact",
@@ -793,6 +793,15 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             .reasons
             .contains(&"material_claim_not_supported:provider-claim-2".into())
     );
+    if let Ok(directory) = std::env::var("RENDER_ARTIFACT_DIR") {
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        tokio::fs::write(
+            std::path::Path::new(&directory).join("report-draft.html"),
+            crate::render::report_html(&report.envelope, &report.body_markdown),
+        )
+        .await
+        .unwrap();
+    }
 
     let response = crate::router(state.clone())
         .oneshot(
@@ -832,6 +841,60 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
         revisions,
         vec![(1, "draft".into()), (2, "needs_review".into())]
     );
+
+    let response = crate::router(state.clone())
+        .oneshot(
+            Request::get(format!("/v1/reports/{}/artifacts/html", reviewed.report_id))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-security-policy").unwrap(),
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Needs Review"));
+    assert!(html.contains("<table>"));
+    assert!(!html.contains("<script"));
+    if let Ok(directory) = std::env::var("RENDER_ARTIFACT_DIR") {
+        tokio::fs::write(
+            std::path::Path::new(&directory).join("report-needs-review.html"),
+            &html,
+        )
+        .await
+        .unwrap();
+    }
+
+    let proxy_state = state.clone().with_report_proxy_host("reports.example");
+    let denied = crate::router(proxy_state.clone())
+        .oneshot(
+            Request::get(format!("/r/{}", run.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let allowed = crate::router(proxy_state)
+        .oneshot(
+            Request::get(format!("/r/{}", run.id))
+                .header("x-forwarded-host", "reports.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
 
     let response = crate::router(state)
         .oneshot(

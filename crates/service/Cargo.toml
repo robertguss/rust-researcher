@@ -7,12 +7,14 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+ammonia.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+pulldown-cmark.workspace = true
 research-protocol.workspace = true
 reqwest.workspace = true
 scraper.workspace = true

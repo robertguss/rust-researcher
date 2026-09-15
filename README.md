@@ -103,7 +103,10 @@ The service defaults to `sqlite://research.db`, `./artifacts`, and
 `127.0.0.1:3000`. Override these with `DATABASE_URL`, `ARTIFACT_ROOT`, and
 `RESEARCH_LISTEN`; point the CLI elsewhere with `RESEARCH_API_URL`. Provider
 calls spend real money. `cargo test` uses deterministic fakes and never calls
-live Exa.
+live Exa. `GET /v1/reports/{id}/artifacts/html` serves authenticated HTML.
+`/r/{run_id}` is the human report page: without proxy configuration it requires
+the bearer token; in deployment, set `RESEARCH_REPORT_PROXY_HOST` to the exact
+private proxy host and the page requires that host in `X-Forwarded-Host`.
 
 ## Next step
 

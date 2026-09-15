@@ -429,8 +429,8 @@ async fn publish_provider_draft(
         .iter()
         .map(|claim| format!("[^{}]", claim.id))
         .collect::<Vec<_>>()
-        .join("\n");
-    let body = format!("# Draft research result\n\n{answer}\n\n## Claim index\n\n{markers}");
+        .join(" ");
+    let body = format!("{answer}\n\n<!-- {markers} -->");
 
     let mut report_sources = Vec::new();
     for source in sources {

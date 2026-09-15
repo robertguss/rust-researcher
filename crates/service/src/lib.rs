@@ -4,6 +4,7 @@ pub mod context;
 pub mod error;
 pub mod exa;
 pub mod jobs;
+pub mod render;
 pub mod reports;
 pub mod runs;
 pub mod store;
@@ -12,7 +13,8 @@ pub mod worker;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, HeaderValue, header},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{DateTime, Datelike, Utc};
@@ -43,6 +45,7 @@ pub struct AppState {
     pub exa: Arc<dyn ExaProvider>,
     pub resolver: Arc<dyn Resolver>,
     token: Arc<str>,
+    report_proxy_host: Option<Arc<str>>,
 }
 
 impl AppState {
@@ -68,11 +71,19 @@ impl AppState {
             exa,
             resolver: Arc::new(SystemResolver),
             token: token.into(),
+            report_proxy_host: std::env::var("RESEARCH_REPORT_PROXY_HOST")
+                .ok()
+                .map(Arc::from),
         })
     }
 
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    pub fn with_report_proxy_host(mut self, host: impl Into<Arc<str>>) -> Self {
+        self.report_proxy_host = Some(host.into());
         self
     }
 }
@@ -85,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/reports/import", post(import_report))
         .route("/v1/reports/{id}", get(get_report))
         .route("/v1/reports/{id}/review", post(review_report))
+        .route("/v1/reports/{id}/artifacts/html", get(report_html))
         .route("/v1/runs", post(create_run))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/provider-result", get(get_provider_result))
@@ -93,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/context/{scope}", get(get_context).put(set_context))
         .route("/v1/backends", get(backends))
         .route("/v1/summary", get(summary))
+        .route("/r/{id}", get(report_page))
         .with_state(state)
 }
 
@@ -225,6 +238,22 @@ fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
         });
     }
     Ok(())
+}
+
+fn authenticate_report_page(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
+    if let Some(expected) = &state.report_proxy_host {
+        let forwarded = headers
+            .get("x-forwarded-host")
+            .and_then(|value| value.to_str().ok());
+        if forwarded == Some(expected.as_ref()) {
+            return Ok(());
+        }
+        return Err(AppError::forbidden(
+            "proxy_required",
+            "report page must arrive through the configured private proxy",
+        ));
+    }
+    authenticate(headers, state)
 }
 
 async fn search(
@@ -472,6 +501,54 @@ async fn get_report(
         envelope,
         body_markdown,
     }))
+}
+
+async fn report_html(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    authenticate(&headers, &state)?;
+    render_report_response(&state, &id).await
+}
+
+async fn report_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<Response, AppError> {
+    authenticate_report_page(&headers, &state)?;
+    let report_id: String = sqlx::query_scalar("SELECT current_report_id FROM runs WHERE id=?")
+        .bind(run_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .flatten()
+        .ok_or_else(|| AppError::validation("report_not_found", "run has no current report"))?;
+    render_report_response(&state, &report_id).await
+}
+
+async fn render_report_response(state: &AppState, report_id: &str) -> Result<Response, AppError> {
+    let row: (String, String) =
+        sqlx::query_as("SELECT envelope_path,body_path FROM reports WHERE id=?")
+            .bind(report_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::validation("report_not_found", "report does not exist"))?;
+    let envelope = serde_json::from_slice(&state.artifacts.read(&row.0).await?)?;
+    let body = String::from_utf8(state.artifacts.read(&row.1).await?)
+        .map_err(|_| AppError::validation("invalid_report", "report body is not UTF-8"))?;
+    let mut response = Html(render::report_html(&envelope, &body)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 async fn review_report(
