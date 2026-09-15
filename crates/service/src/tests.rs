@@ -681,6 +681,8 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     let current = crate::runs::get(&state.pool, &run.id).await.unwrap();
     assert_eq!(current.execution, "succeeded");
     assert_eq!(current.external, "terminal");
+    assert_eq!(current.label, Label::Draft);
+    assert!(current.current_report_id.is_some());
     let stored: (String, i64, String) = sqlx::query_as(
         "SELECT status,reported_microusd,output_path FROM provider_runs WHERE run_id=?",
     )
@@ -706,11 +708,35 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
         .await
         .unwrap();
     assert_eq!(linked_sources, 1);
+    let report: (String, String, i64) = sqlx::query_as(
+        "SELECT current_computed_label,review_level,(SELECT COUNT(*) FROM assessments WHERE report_id=reports.id) FROM reports WHERE run_id=?",
+    )
+    .bind(&run.id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(report, ("draft".into(), "structural".into(), 1));
     let sent = fake.create_body.lock().await.clone().unwrap();
     assert_eq!(sent["query"], "Find the supported answer");
     assert_eq!(sent["effort"], "low");
     assert!(sent.get("budget").is_none());
     assert_eq!(*fake.polls.lock().await, 1);
+
+    let report_id = current.current_report_id.unwrap();
+    let response = crate::router(state.clone())
+        .oneshot(
+            Request::get(format!("/v1/reports/{report_id}"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: StoredReportResponse =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(report.envelope.label, Some(Label::Draft));
+    assert!(report.body_markdown.contains("A collected answer"));
 
     let response = crate::router(state)
         .oneshot(

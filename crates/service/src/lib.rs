@@ -20,7 +20,7 @@ use research_protocol::{
     AccessLevel, BackendContract, ContentKind, ContextDocument, CreateRunRequest, FreshnessClass,
     ProviderRunResponse, ReconcileRequest, ReportImportRequest, ReportImportResponse, RunResponse,
     Scope, SearchRequest, SearchResponse, SetContextRequest, SourceRequest, SourceResponse,
-    SummaryResponse,
+    StoredReportResponse, SummaryResponse,
 };
 use sqlx::{
     SqlitePool,
@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sources", post(source))
         .route("/v1/sources/{id}", get(get_source))
         .route("/v1/reports/import", post(import_report))
+        .route("/v1/reports/{id}", get(get_report))
         .route("/v1/runs", post(create_run))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/provider-result", get(get_provider_result))
@@ -448,6 +449,28 @@ async fn import_report(
     Ok(Json(
         reports::import(&state.pool, &state.artifacts, request).await?,
     ))
+}
+
+async fn get_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<StoredReportResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    let row: (String, String) =
+        sqlx::query_as("SELECT envelope_path,body_path FROM reports WHERE id=?")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::validation("report_not_found", "report does not exist"))?;
+    let envelope = serde_json::from_slice(&state.artifacts.read(&row.0).await?)?;
+    let body_markdown = String::from_utf8(state.artifacts.read(&row.1).await?)
+        .map_err(|_| AppError::validation("invalid_report", "report body is not UTF-8"))?;
+    Ok(Json(StoredReportResponse {
+        report_id: id,
+        envelope,
+        body_markdown,
+    }))
 }
 
 async fn backends(

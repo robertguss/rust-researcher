@@ -19,8 +19,8 @@ versioned standing context, idempotent managed run submission, independent run
 state dimensions, an attempt-epoch-fenced SQLx lease coordinator, explicit
 ambiguous-submission reconciliation, and an Exa Agent worker that durably
 collects provider results and reconciles cost. Rendering, notifications, and
-deployment remain deferred. No live research backend is selected until the D-003
-comparison is complete.
+deployment remain deferred. D-017 authorizes Exa-first development while the
+full backend comparison remains deferred.
 
 ## Documents
 
@@ -83,6 +83,14 @@ cargo run -p research-service
 # In another shell:
 RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
   search "Rust 1.98 release notes"
+
+# Managed Exa run, followed by its service-labelled report:
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  run "Compare two options" --backend exa-agent --depth lookup --effort minimal
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  status RUN_ID
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  report REPORT_ID
 ```
 
 The service defaults to `sqlite://research.db`, `./artifacts`, and
@@ -93,10 +101,7 @@ live Exa.
 
 ## Next step
 
-Phase 0 of the architecture proposal, with the decisions in the decision records
-already taken: write the rubric and golden cases, score the incumbent Perplexity
-report, build the thin evidence loop, verify Exa's capabilities against the real
-account, run the backend comparison between Exa Agent and one official CLI under
-an authorised spending ceiling, measure the renderer, Docling, and mixed load on
-the target VM, and choose the queue implementation. Then build one vertical
-slice to the phone and pilot it on real work before cancelling anything.
+Continue the Exa-first vertical slice under D-017: review acquired passages into
+claim-level evidence, render report revisions, add the private read-only report
+page and notification delivery, then pilot it on real work. The backend
+comparison remains a quality-validation task rather than a development gate.

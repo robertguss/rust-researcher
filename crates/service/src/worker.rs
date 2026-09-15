@@ -1,8 +1,13 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use research_protocol::{FreshnessClass, SourceRequest};
+use research_protocol::{
+    ArtifactRef, Assumptions, Claim, ClaimKind, ClaimReview, Completion, FreshnessClass, Label,
+    ProducedBy, ReportEnvelope, ReportImportRequest, ReportSearch, ReportSource, RequiredQuestion,
+    Review, ReviewLevel, SourceRequest, SourceResponse,
+};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use crate::{AppState, budget, error::AppError, exa::AgentRun, jobs};
@@ -150,10 +155,6 @@ async fn execute_exa(
         provider_run = state.exa.get_agent_run(&provider_run.id).await?;
     }
 
-    if provider_run.status == "completed" {
-        acquire_grounded_sources(state, claim, &provider_run).await?;
-    }
-
     let bytes = serde_json::to_vec(&provider_run)?;
     let (hash, path) = state.artifacts.put(&bytes).await?;
     let cost = provider_run.reported_cost_microusd();
@@ -184,6 +185,8 @@ async fn execute_exa(
         .execute(&state.pool)
         .await?;
     if provider_run.status == "completed" {
+        let sources = acquire_grounded_sources(state, claim, &provider_run).await?;
+        publish_provider_draft(state, claim, &provider_run, &bytes, sources).await?;
         jobs::complete(&state.pool, claim).await
     } else {
         jobs::fail(
@@ -199,7 +202,7 @@ async fn acquire_grounded_sources(
     state: &AppState,
     claim: &jobs::JobClaim,
     provider_run: &AgentRun,
-) -> Result<(), AppError> {
+) -> Result<Vec<SourceResponse>, AppError> {
     let urls = provider_run
         .output
         .get("grounding")
@@ -211,6 +214,7 @@ async fn acquire_grounded_sources(
         .filter_map(|citation| citation.get("url").and_then(Value::as_str))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+    let mut acquired = Vec::new();
     for url in urls {
         match crate::acquire_source(
             state,
@@ -225,9 +229,10 @@ async fn acquire_grounded_sources(
             Ok(source) => {
                 sqlx::query("INSERT OR IGNORE INTO run_sources (run_id,acquisition_id,provenance,inclusion_reason) VALUES (?,?,'exa_grounding','provider citation')")
                     .bind(&claim.run_id)
-                    .bind(source.acquisition_id)
+                    .bind(&source.acquisition_id)
                     .execute(&state.pool)
                     .await?;
+                acquired.push(source);
             }
             Err(error) => {
                 sqlx::query("INSERT INTO events (run_id,event_type,occurred_at,payload_json) VALUES (?,'grounded_source_acquisition_failed',?,?)")
@@ -239,7 +244,122 @@ async fn acquire_grounded_sources(
             }
         }
     }
+    Ok(acquired)
+}
+
+async fn publish_provider_draft(
+    state: &AppState,
+    claim: &jobs::JobClaim,
+    provider_run: &AgentRun,
+    provider_bytes: &[u8],
+    sources: Vec<SourceResponse>,
+) -> Result<(), AppError> {
+    let text = provider_run
+        .output
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("Provider completed without textual output.");
+    let body = format!("# Draft research result\n\n{text}\n\n[^provider-output]");
+    let (brief, backend_config, context_version): (String, String, Option<i64>) = sqlx::query_as(
+        "SELECT brief_json,backend_config_json,context_version FROM runs WHERE id=?",
+    )
+    .bind(&claim.run_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let mut report_sources = Vec::new();
+    for source in sources {
+        let (retrieved_at, origin_group): (String, String) = sqlx::query_as(
+            "SELECT a.retrieved_at,s.origin_group FROM acquisitions a JOIN sources s ON s.id=a.source_id WHERE a.id=?",
+        )
+        .bind(&source.acquisition_id)
+        .fetch_one(&state.pool)
+        .await?;
+        report_sources.push(ReportSource {
+            acquisition: source.acquisition_id,
+            extraction: source.extraction_id,
+            content_kind: source.content_kind,
+            access_level: source.access_level,
+            retrieved_at: chrono::DateTime::parse_from_rfc3339(&retrieved_at)
+                .map_err(|_| {
+                    AppError::validation("invalid_timestamp", "stored timestamp is invalid")
+                })?
+                .with_timezone(&Utc),
+            origin_group,
+        });
+    }
+    let body_hash = sha256(body.as_bytes());
+    let provider_native: Value = serde_json::from_slice(provider_bytes)?;
+    let provider_hash = sha256(&serde_json::to_vec(&provider_native)?);
+    let envelope = ReportEnvelope {
+        schema_version: "1".into(),
+        run_id: claim.run_id.clone(),
+        revision: 1,
+        supersedes: None,
+        label: Some(Label::Reviewed),
+        produced_by: ProducedBy {
+            backend: "exa-agent".into(),
+            backend_config: serde_json::from_str(&backend_config)?,
+            instruction_version: "2026-09-15.1".into(),
+            context_version: context_version.unwrap_or_default() as u32,
+            model: None,
+        },
+        brief: serde_json::from_str(&brief)?,
+        assumptions: Assumptions::default(),
+        body_markdown_path: "report.md".into(),
+        body_hash,
+        claims: vec![Claim {
+            id: "provider-output".into(),
+            kind: ClaimKind::Observation,
+            text: text.into(),
+            material: true,
+            evidence: vec![],
+            derivation: None,
+            review: ClaimReview {
+                checked: false,
+                by: None,
+                note: Some("Provider grounding contains URLs but no checked passages".into()),
+                outcome: None,
+            },
+        }],
+        evidence: vec![],
+        assessments: vec![],
+        sources: report_sources,
+        searches: Vec::<ReportSearch>::new(),
+        completion: Completion {
+            required_questions: vec![RequiredQuestion {
+                q: "Material claims checked against acquired passages".into(),
+                answered: false,
+                unanswerable_reason: None,
+            }],
+            hit_limit: None,
+            what_would_change_this: "Review each material claim against acquired source text"
+                .into(),
+        },
+        review: Review {
+            level: ReviewLevel::Structural,
+            records: vec![],
+        },
+        provider_native: Some(ArtifactRef {
+            path: "provider-native.json".into(),
+            hash: provider_hash,
+        }),
+        artifacts: Default::default(),
+    };
+    crate::reports::import(
+        &state.pool,
+        &state.artifacts,
+        ReportImportRequest {
+            envelope,
+            body_markdown: body,
+            provider_native: Some(provider_native),
+        },
+    )
+    .await?;
     Ok(())
+}
+
+fn sha256(value: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value)))
 }
 
 pub async fn run(state: AppState) {

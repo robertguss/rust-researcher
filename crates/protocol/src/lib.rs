@@ -98,6 +98,13 @@ pub struct ReportImportResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredReportResponse {
+    pub report_id: String,
+    pub envelope: ReportEnvelope,
+    pub body_markdown: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportEnvelope {
     pub schema_version: String,
     pub run_id: String,

@@ -62,6 +62,9 @@ enum Command {
     Result {
         run_id: String,
     },
+    Report {
+        report_id: String,
+    },
     Cancel {
         run_id: String,
     },
@@ -323,6 +326,11 @@ async fn main() -> anyhow::Result<()> {
             let response: research_protocol::ProviderRunResponse = client
                 .get(&format!("/v1/runs/{run_id}/provider-result"))
                 .await?;
+            serde_json::to_value(response)?
+        }
+        Command::Report { report_id } => {
+            let response: research_protocol::StoredReportResponse =
+                client.get(&format!("/v1/reports/{report_id}")).await?;
             serde_json::to_value(response)?
         }
         Command::Cancel { run_id } => {
