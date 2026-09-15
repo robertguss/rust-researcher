@@ -1,8 +1,11 @@
 pub mod acquisition;
 pub mod budget;
+pub mod context;
 pub mod error;
 pub mod exa;
+pub mod jobs;
 pub mod reports;
+pub mod runs;
 pub mod store;
 
 use axum::{
@@ -13,9 +16,9 @@ use axum::{
 };
 use chrono::{Datelike, Utc};
 use research_protocol::{
-    AccessLevel, BackendContract, ContentKind, FreshnessClass, ReportImportRequest,
-    ReportImportResponse, SearchRequest, SearchResponse, SourceRequest, SourceResponse,
-    SummaryResponse,
+    AccessLevel, BackendContract, ContentKind, ContextDocument, CreateRunRequest, FreshnessClass,
+    ReconcileRequest, ReportImportRequest, ReportImportResponse, RunResponse, Scope, SearchRequest,
+    SearchResponse, SetContextRequest, SourceRequest, SourceResponse, SummaryResponse,
 };
 use sqlx::{
     SqlitePool,
@@ -24,7 +27,7 @@ use sqlx::{
 use std::{collections::BTreeMap, path::Path as FsPath, str::FromStr, sync::Arc};
 
 use acquisition::{Resolver, SystemResolver, canonicalize, fetch_live};
-use budget::{EXA_CONTENTS_RESERVATION_MICRO_USD, EXA_SEARCH_RESERVATION_MICRO_USD};
+use budget::EXA_CONTENTS_RESERVATION_MICRO_USD;
 use error::AppError;
 use exa::{ExaProvider, HttpExaProvider};
 use store::ArtifactStore;
@@ -78,9 +81,92 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sources", post(source))
         .route("/v1/sources/{id}", get(get_source))
         .route("/v1/reports/import", post(import_report))
+        .route("/v1/runs", post(create_run))
+        .route("/v1/runs/{id}", get(get_run))
+        .route("/v1/runs/{id}/cancel", post(cancel_run))
+        .route("/v1/runs/{id}/reconcile", post(reconcile_run))
+        .route("/v1/context/{scope}", get(get_context).put(set_context))
         .route("/v1/backends", get(backends))
         .route("/v1/summary", get(summary))
         .with_state(state)
+}
+
+fn parse_scope(value: &str) -> Result<Scope, AppError> {
+    match value {
+        "personal" => Ok(Scope::Personal),
+        "work" => Ok(Scope::Work),
+        _ => Err(AppError::validation(
+            "invalid_scope",
+            "scope must be personal or work",
+        )),
+    }
+}
+
+async fn get_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(scope): Path<String>,
+) -> Result<Json<ContextDocument>, AppError> {
+    authenticate(&headers, &state)?;
+    context::latest(&state.pool, &parse_scope(&scope)?)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::validation("context_not_found", "context profile does not exist"))
+}
+
+async fn set_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(scope): Path<String>,
+    Json(request): Json<SetContextRequest>,
+) -> Result<Json<ContextDocument>, AppError> {
+    authenticate(&headers, &state)?;
+    Ok(Json(
+        context::set(&state.pool, parse_scope(&scope)?, request.document).await?,
+    ))
+}
+
+async fn create_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateRunRequest>,
+) -> Result<Json<RunResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            AppError::validation("missing_idempotency_key", "Idempotency-Key is required")
+        })?;
+    Ok(Json(runs::create(&state.pool, key, request).await?))
+}
+
+async fn get_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<RunResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    Ok(Json(runs::get(&state.pool, &id).await?))
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<RunResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    Ok(Json(runs::cancel(&state.pool, &id).await?))
+}
+
+async fn reconcile_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<ReconcileRequest>,
+) -> Result<Json<RunResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    Ok(Json(runs::reconcile(&state.pool, &id, request).await?))
 }
 
 fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
@@ -111,8 +197,13 @@ async fn search(
         ));
     }
     let id = format!("search_{}", uuid::Uuid::new_v4());
-    let reservation =
-        budget::reserve(&state.pool, "search", &id, EXA_SEARCH_RESERVATION_MICRO_USD).await?;
+    let reservation = budget::reserve(
+        &state.pool,
+        "search",
+        &id,
+        budget::exa_search_reservation(request.result_count),
+    )
+    .await?;
     let provider = match state.exa.search(&request.query, request.result_count).await {
         Ok(value) => value,
         Err(error) => {

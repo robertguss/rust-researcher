@@ -39,6 +39,7 @@ pub async fn import(
         ));
     }
 
+    request.envelope.assessments.clear();
     let (label, reasons) = compute_label(&request.envelope);
     request.envelope.label = Some(label.clone());
     request
@@ -73,6 +74,19 @@ pub async fn import(
     let (envelope_hash, envelope_path) = store.put(&envelope_bytes).await?;
     let report_id = format!("report_{}", uuid::Uuid::new_v4());
     let mut tx = pool.begin().await?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT OR IGNORE INTO runs (id,brief_json,mode,backend,backend_contract_version,depth,context_version,instruction_version,execution,completeness,review,label,notification,external,created_at,updated_at) VALUES (?,?,'imported',?,'import-v1','standard',?,?,'succeeded','none','structural','draft','pending','none',?,?)",
+    )
+    .bind(&request.envelope.run_id)
+    .bind(serde_json::to_string(&request.envelope.brief)?)
+    .bind(&request.envelope.produced_by.backend)
+    .bind(request.envelope.produced_by.context_version)
+    .bind(&request.envelope.produced_by.instruction_version)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
     for evidence in &request.envelope.evidence {
         sqlx::query(
             "INSERT INTO evidence (id, run_id, extraction_id, relation, locator_json, quoted_text, normalisation, mechanical_check) VALUES (?, ?, ?, ?, ?, ?, ?, 'passed')",
@@ -84,6 +98,28 @@ pub async fn import(
         .bind(serde_json::to_string(&evidence.locator)?)
         .bind(&evidence.quote)
         .bind(&evidence.normalisation)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for search in &request.envelope.searches {
+        let results = search
+            .returned_urls
+            .iter()
+            .map(|url| serde_json::json!({ "url": url, "exclusion_reason": null }))
+            .chain(search.excluded.iter().map(|excluded| {
+                serde_json::json!({ "url": excluded.url, "exclusion_reason": excluded.reason })
+            }))
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "INSERT OR IGNORE INTO searches (id, run_id, backend, query, searched_at, result_count, results_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&search.id)
+        .bind(&request.envelope.run_id)
+        .bind(&search.backend)
+        .bind(&search.query)
+        .bind(search.at.to_rfc3339())
+        .bind(search.result_count)
+        .bind(serde_json::to_string(&results)?)
         .execute(&mut *tx)
         .await?;
     }
@@ -104,6 +140,15 @@ pub async fn import(
     .bind(Utc::now().to_rfc3339())
     .execute(&mut *tx)
     .await?;
+    sqlx::query("UPDATE runs SET current_report_id=?,completeness=?,review=?,label=?,updated_at=? WHERE id=?")
+        .bind(&report_id)
+        .bind(if request.envelope.completion.required_questions.iter().all(|question| question.answered || question.unanswerable_reason.is_some()) { "complete" } else { "partial" })
+        .bind(review_level_name(&request.envelope.review.level))
+        .bind(label_name(&label))
+        .bind(&now)
+        .bind(&request.envelope.run_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "INSERT INTO assessments (report_id, assessed_at, reviewer, policy_version, computed_label, reasons_json) VALUES (?, ?, 'service', ?, ?, ?)",
     )
@@ -315,7 +360,7 @@ pub fn compute_label(envelope: &ReportEnvelope) -> (Label, Vec<String>) {
     let reviewed = matches!(
         envelope.review.level,
         ReviewLevel::MaterialClaimsReviewed | ReviewLevel::FullyReviewed
-    );
+    ) && !envelope.review.records.is_empty();
     let problems = envelope
         .claims
         .iter()
@@ -344,7 +389,22 @@ pub fn compute_label(envelope: &ReportEnvelope) -> (Label, Vec<String>) {
         reasons.push("material_claims_not_reviewed".into());
     }
     for claim in envelope.claims.iter().filter(|claim| claim.material) {
-        if !claim.review.checked
+        let unsuitable_source = claim.evidence.iter().any(|id| {
+            envelope.evidence.iter().any(|evidence| {
+                evidence.id == *id
+                    && envelope.sources.iter().any(|source| {
+                        source.extraction == evidence.extraction
+                            && (matches!(
+                                source.access_level,
+                                research_protocol::AccessLevel::MetadataOnly
+                                    | research_protocol::AccessLevel::Snippet
+                            ) || source.content_kind
+                                == research_protocol::ContentKind::ModelSummary)
+                    })
+            })
+        });
+        if unsuitable_source
+            || !claim.review.checked
             || !matches!(
                 claim.review.outcome,
                 Some(AssessmentOutcome::Supported | AssessmentOutcome::Qualified)

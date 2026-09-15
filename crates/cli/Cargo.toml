@@ -12,8 +12,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+chrono.workspace = true
 research-protocol.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+uuid.workspace = true

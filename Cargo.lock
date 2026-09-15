@@ -1663,12 +1663,14 @@ name = "research-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "reqwest",
  "research-protocol",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

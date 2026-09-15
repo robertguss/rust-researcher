@@ -419,21 +419,15 @@ it; migration is real work, not a free SQLx switch.
 
 ### Queue implementation decision
 
-Evaluate pinned **Apalis + SQLite** against these recovery requirements before
-building a custom queue. Prefer it if its task lifecycle fits without
-maintaining a second competing state machine. A bespoke SQLx lease executor is
-the fallback, not an assumed shortcut: claims, crash windows, fencing,
-cancellation and retries need explicit tests either way. No Redis in v1.
+The Phase 0 comparison selected a narrow SQLx lease coordinator
+([D-016](decisions.md#d-016-narrow-sqlx-lease-coordinator)). Apalis SQLite's
+named queues and fetch mechanics were useful, but its lifecycle and worker-ID
+locking could not represent blocked/unknown reconciliation or attempt-epoch
+fencing without a second application-owned state machine. No Redis in v1.
 
-Evaluate against the **first slice's** requirement, not the four-kind universal
-executor: one active managed run, persisted stage and external task ID, the
-submission-ambiguity handling above, report publication, and a notification
-outbox, in two lanes. Apalis solves scheduling and retry mechanics; it does not
-solve provider reconciliation or publication atomicity, which are application
-code either way. Decision rule: Apalis if the pinned version handles the
-mechanics without a competing lifecycle; a narrow SQLx coordinator if
-integrating it adds more translation than it removes. Neither option is a
-general queue framework.
+The coordinator remains deliberately narrow: one jobs table, atomic
+`UPDATE ... RETURNING` claims, two lanes, renewable leases, and an epoch
+predicate on every worker write. It is not a general queue framework.
 
 ## 7. PDF ingestion and worker isolation
 

@@ -1,7 +1,8 @@
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use research_protocol::{
-    FreshnessClass, ReportEnvelope, ReportImportRequest, SearchRequest, SourceRequest,
+    Clarification, Classification, CreateRunRequest, Depth, FreshnessClass, ReconcileRequest,
+    ReportEnvelope, ReportImportRequest, ResearchBrief, Scope, SearchRequest, SourceRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
@@ -38,8 +39,66 @@ enum Command {
     Import {
         file: PathBuf,
     },
+    Run {
+        question: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long, default_value = "standard")]
+        depth: CliDepth,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        max_cost: Option<String>,
+        #[arg(long)]
+        max_duration: Option<u64>,
+        #[arg(long)]
+        accept_weaker_limits: bool,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    Status {
+        run_id: String,
+    },
+    Cancel {
+        run_id: String,
+    },
+    Reconcile {
+        run_id: String,
+        #[arg(value_enum)]
+        action: ReconcileAction,
+        #[arg(long)]
+        external_task_id: Option<String>,
+        #[arg(long)]
+        accept_charge: bool,
+    },
     Backends,
     Summary,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum ReconcileAction {
+    Adopt,
+    MarkFailed,
+    Resubmit,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum CliDepth {
+    Lookup,
+    Standard,
+    Deep,
+    Extended,
+}
+
+impl From<CliDepth> for Depth {
+    fn from(value: CliDepth) -> Self {
+        match value {
+            CliDepth::Lookup => Self::Lookup,
+            CliDepth::Standard => Self::Standard,
+            CliDepth::Deep => Self::Deep,
+            CliDepth::Extended => Self::Extended,
+        }
+    }
 }
 
 #[derive(Clone, clap::ValueEnum, Default)]
@@ -78,6 +137,24 @@ impl Client {
             self.http
                 .post(format!("{}{path}", self.base.trim_end_matches('/')))
                 .bearer_auth(&self.token)
+                .json(body)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    async fn post_idempotent<T: Serialize, R: DeserializeOwned>(
+        &self,
+        path: &str,
+        key: &str,
+        body: &T,
+    ) -> anyhow::Result<R> {
+        self.handle(
+            self.http
+                .post(format!("{}{path}", self.base.trim_end_matches('/')))
+                .bearer_auth(&self.token)
+                .header("idempotency-key", key)
                 .json(body)
                 .send()
                 .await?,
@@ -188,6 +265,79 @@ async fn main() -> anyhow::Result<()> {
                         provider_native,
                     },
                 )
+                .await?;
+            serde_json::to_value(response)?
+        }
+        Command::Run {
+            question,
+            backend,
+            depth,
+            effort,
+            max_cost,
+            max_duration,
+            accept_weaker_limits,
+            idempotency_key,
+        } => {
+            let key = idempotency_key.unwrap_or_else(|| format!("cli_{}", uuid::Uuid::new_v4()));
+            let request = CreateRunRequest {
+                brief: ResearchBrief {
+                    question,
+                    decision: "unknown".into(),
+                    audience: None,
+                    locale: None,
+                    as_of: chrono::Utc::now(),
+                    required_questions: vec![],
+                    constraints: serde_json::Value::Null,
+                    exclusions: serde_json::Value::Null,
+                    assumptions: serde_json::Value::Null,
+                    depth: depth.into(),
+                    clarification: Clarification::Assume,
+                    scope: Scope::Personal,
+                    classification: Some(Classification::PersonalSensitive),
+                    evidence_policy: serde_json::Value::Null,
+                    output: serde_json::Value::Null,
+                },
+                backend,
+                backend_config: effort
+                    .map(|effort| serde_json::json!({ "effort": effort }))
+                    .unwrap_or_else(|| serde_json::json!({})),
+                max_duration_seconds: max_duration,
+                max_cost_usd: max_cost,
+                accept_weaker_limits,
+                follow_up_of: None,
+                classification_override_reason: None,
+            };
+            let response: research_protocol::RunResponse =
+                client.post_idempotent("/v1/runs", &key, &request).await?;
+            serde_json::to_value(response)?
+        }
+        Command::Status { run_id } => {
+            let response: research_protocol::RunResponse =
+                client.get(&format!("/v1/runs/{run_id}")).await?;
+            serde_json::to_value(response)?
+        }
+        Command::Cancel { run_id } => {
+            let response: research_protocol::RunResponse = client
+                .post(&format!("/v1/runs/{run_id}/cancel"), &serde_json::json!({}))
+                .await?;
+            serde_json::to_value(response)?
+        }
+        Command::Reconcile {
+            run_id,
+            action,
+            external_task_id,
+            accept_charge,
+        } => {
+            let request = match action {
+                ReconcileAction::Adopt => ReconcileRequest::Adopt {
+                    external_task_id: external_task_id
+                        .context("--external-task-id is required for adopt")?,
+                },
+                ReconcileAction::MarkFailed => ReconcileRequest::MarkFailed,
+                ReconcileAction::Resubmit => ReconcileRequest::Resubmit { accept_charge },
+            };
+            let response: research_protocol::RunResponse = client
+                .post(&format!("/v1/runs/{run_id}/reconcile"), &request)
                 .await?;
             serde_json::to_value(response)?
         }

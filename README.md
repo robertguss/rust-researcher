@@ -16,6 +16,10 @@ two-rung source acquisition, immutable acquisition/extraction artifacts, report
 envelope import with mechanical evidence checks and service-computed labels,
 spend reservation, and the thin `research` CLI. Managed execution, workers,
 rendering, notifications, and deployment remain deferred as described below.
+Phase 1 foundations now include versioned standing context, idempotent managed
+run submission, independent run-state dimensions, an attempt-epoch-fenced SQLx
+lease coordinator, and explicit ambiguous-submission reconciliation. No live
+research backend is selected until the D-003 comparison is complete.
 
 ## Documents
 

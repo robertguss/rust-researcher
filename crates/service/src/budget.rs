@@ -5,8 +5,11 @@ use crate::error::AppError;
 
 pub const DAILY_CAP_MICRO_USD: i64 = 15_000_000;
 pub const MONTHLY_CAP_MICRO_USD: i64 = 150_000_000;
-pub const EXA_SEARCH_RESERVATION_MICRO_USD: i64 = 10_000;
-pub const EXA_CONTENTS_RESERVATION_MICRO_USD: i64 = 10_000;
+pub const EXA_CONTENTS_RESERVATION_MICRO_USD: i64 = 1_000;
+
+pub fn exa_search_reservation(result_count: u32) -> i64 {
+    7_000 + i64::from(result_count.saturating_sub(10)) * 1_000
+}
 
 #[derive(Debug)]
 pub struct Reservation {
@@ -23,8 +26,14 @@ pub async fn reserve(
     sqlx::query("BEGIN IMMEDIATE")
         .execute(&mut *connection)
         .await?;
-    let result =
-        reserve_in_transaction(&mut connection, operation_kind, operation_id, amount).await;
+    let result = reserve_in_transaction(
+        &mut connection,
+        operation_kind,
+        operation_id,
+        amount,
+        operation_id,
+    )
+    .await;
     match result {
         Ok(reservation) => {
             sqlx::query("COMMIT").execute(&mut *connection).await?;
@@ -37,11 +46,12 @@ pub async fn reserve(
     }
 }
 
-async fn reserve_in_transaction(
+pub(crate) async fn reserve_in_transaction(
     connection: &mut SqliteConnection,
     operation_kind: &str,
     operation_id: &str,
     amount: i64,
+    idempotency_key: &str,
 ) -> Result<Reservation, AppError> {
     let now = Utc::now();
     let day = now
@@ -82,7 +92,7 @@ async fn reserve_in_transaction(
     .bind(operation_kind)
     .bind(operation_id)
     .bind(amount)
-    .bind(operation_id)
+    .bind(idempotency_key)
     .bind(now.to_rfc3339_opts(SecondsFormat::Millis, true))
     .execute(&mut *connection)
     .await?;

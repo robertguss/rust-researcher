@@ -42,6 +42,15 @@ impl AppError {
             retryable: false,
         }
     }
+
+    pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Client {
+            status: StatusCode::CONFLICT,
+            code,
+            message: message.into(),
+            retryable: false,
+        }
+    }
 }
 
 impl IntoResponse for AppError {

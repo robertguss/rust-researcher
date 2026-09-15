@@ -278,6 +278,30 @@ overturn any of them by editing the entry.
 - **Reversed by:** Pilot observations. Any change is a new dated entry here, not
   a silent config edit.
 
+## D-016: Narrow SQLx lease coordinator
+
+- **Date:** 2026-09-15
+- **Status:** accepted by delegation; supersedes D-005
+- **Decision:** Use the application's SQLx `jobs` table as the sole durable
+  queue and lifecycle. Claims atomically increment `attempt_epoch`; every worker
+  write is fenced by that epoch. Expired pre-submission jobs may queue again,
+  while expired jobs with an external task ID become `unknown` and require
+  explicit reconciliation. Control and heavy lanes are separate indexed claims.
+- **Alternatives:** Apalis with SQLite for dispatch plus an application-owned
+  lifecycle; Redis; Apalis as the authoritative lifecycle.
+- **Evidence:** Apalis SQLite 1.0.0-rc.8 (reviewed at upstream commit
+  `f49ea2ddb00ad8f0d7986e45a2d575c73849066a`) has useful named queues and atomic
+  fetch mechanics, but its states are Pending/Queued/Running/Done/Failed/
+  Killed, acknowledgement fences by worker ID rather than attempt epoch, and it
+  has no ambiguous-paid-submission reconciliation. Adding the required states,
+  external IDs, and fencing beside it would create the competing lifecycle D-005
+  said to avoid. Deterministic local tests confirm that a stale epoch cannot
+  complete a reclaimed job and that an expired paid submission is not reclaimed
+  for blind retry.
+- **Reversed by:** Sustained measured contention or scheduling requirements the
+  narrow coordinator cannot satisfy. A replacement must preserve the domain
+  state and attempt-epoch contract rather than map it to weaker queue states.
+
 ## Pending decisions with dates
 
 Everything that could be decided without evidence has been decided. What remains
@@ -287,7 +311,6 @@ plan's mistake of choosing before measuring.
 | Decision                             | Needed by                             | Blocked on                                  |
 | ------------------------------------ | ------------------------------------- | ------------------------------------------- |
 | Approve or reject D-003 hosted-first | End of Phase 0                        | Backend comparison results                  |
-| Choose D-005 queue                   | Start of Phase 1                      | Phase 0 recovery test                       |
 | VM size                              | Start of Phase 1                      | Phase 0 mixed-load measurements             |
 | Exa ZDR cell in the D-010 table      | Before first `work` run on Exa search | Phase 0 verification of account ZDR setting |
 

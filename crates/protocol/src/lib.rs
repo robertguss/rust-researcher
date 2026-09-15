@@ -64,7 +64,7 @@ pub struct SourceResponse {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentKind {
     Raw,
@@ -72,7 +72,7 @@ pub enum ContentKind {
     ModelSummary,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessLevel {
     MetadataOnly,
@@ -245,6 +245,8 @@ pub struct ReportSearch {
     pub at: DateTime<Utc>,
     pub result_count: u32,
     #[serde(default)]
+    pub returned_urls: Vec<String>,
+    #[serde(default)]
     pub excluded: Vec<ExcludedUrl>,
 }
 
@@ -334,6 +336,126 @@ pub struct SummaryResponse {
     pub reports: u64,
     pub sources: u64,
     pub searches: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRunRequest {
+    pub brief: ResearchBrief,
+    pub backend: String,
+    #[serde(default)]
+    pub backend_config: Value,
+    pub max_duration_seconds: Option<u64>,
+    pub max_cost_usd: Option<String>,
+    #[serde(default)]
+    pub accept_weaker_limits: bool,
+    pub follow_up_of: Option<String>,
+    pub classification_override_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchBrief {
+    pub question: String,
+    #[serde(default = "unknown_decision")]
+    pub decision: String,
+    pub audience: Option<String>,
+    pub locale: Option<String>,
+    pub as_of: DateTime<Utc>,
+    #[serde(default)]
+    pub required_questions: Vec<String>,
+    #[serde(default)]
+    pub constraints: Value,
+    #[serde(default)]
+    pub exclusions: Value,
+    #[serde(default)]
+    pub assumptions: Value,
+    pub depth: Depth,
+    #[serde(default)]
+    pub clarification: Clarification,
+    #[serde(default)]
+    pub scope: Scope,
+    pub classification: Option<Classification>,
+    #[serde(default)]
+    pub evidence_policy: Value,
+    #[serde(default)]
+    pub output: Value,
+}
+
+fn unknown_decision() -> String {
+    "unknown".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Depth {
+    Lookup,
+    Standard,
+    Deep,
+    Extended,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Clarification {
+    Ask,
+    #[default]
+    Assume,
+    Hold,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    #[default]
+    Personal,
+    Work,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Classification {
+    Public,
+    PersonalSensitive,
+    WorkConfidential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResponse {
+    pub id: String,
+    pub brief: ResearchBrief,
+    pub mode: String,
+    pub backend: String,
+    pub backend_contract_version: String,
+    pub execution: String,
+    pub blocked_reason: Option<String>,
+    pub completeness: String,
+    pub review: String,
+    pub label: Label,
+    pub notification: String,
+    pub external: String,
+    pub current_report_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ReconcileRequest {
+    Adopt { external_task_id: String },
+    MarkFailed,
+    Resubmit { accept_charge: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextDocument {
+    pub scope: Scope,
+    pub version: u32,
+    pub document: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetContextRequest {
+    pub document: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -163,6 +163,14 @@ async fn concurrent_reservations_cannot_both_spend_the_last_dollar() {
     assert_eq!(total, budget::DAILY_CAP_MICRO_USD);
 }
 
+#[test]
+fn exa_search_reservation_matches_documented_tiers() {
+    assert_eq!(budget::exa_search_reservation(1), 7_000);
+    assert_eq!(budget::exa_search_reservation(10), 7_000);
+    assert_eq!(budget::exa_search_reservation(11), 8_000);
+    assert_eq!(budget::exa_search_reservation(100), 97_000);
+}
+
 struct PrivateRedirectResolver;
 
 #[async_trait]
@@ -274,11 +282,31 @@ async fn real_quote_does_not_make_wrong_conclusion_supported_and_worker_label_is
     let (_, acquisition, extraction) =
         stored_extraction(&state, "Pricing: The basic plan costs ten dollars.").await;
     let body = "# Report\n\nBuy it.[^c1]";
+    let mut submitted = envelope(&acquisition, &extraction, body);
+    submitted.assessments.push(Assessment {
+        at: Utc::now(),
+        by: "worker-pretending-to-be-service".into(),
+        policy_version: "fake".into(),
+        label: Label::Reviewed,
+        reasons: vec![],
+    });
+    submitted.searches.push(ReportSearch {
+        id: "search_imported".into(),
+        backend: "external".into(),
+        query: "missing product evidence".into(),
+        at: Utc::now(),
+        result_count: 1,
+        returned_urls: vec!["https://example.com/kept".into()],
+        excluded: vec![ExcludedUrl {
+            url: "https://example.com/paywall".into(),
+            reason: "paywalled".into(),
+        }],
+    });
     let response = crate::reports::import(
         &state.pool,
         &state.artifacts,
         ReportImportRequest {
-            envelope: envelope(&acquisition, &extraction, body),
+            envelope: submitted,
             body_markdown: body.into(),
             provider_native: None,
         },
@@ -294,6 +322,40 @@ async fn real_quote_does_not_make_wrong_conclusion_supported_and_worker_label_is
     let (check, stored_label): (String, String) = sqlx::query_as("SELECT e.mechanical_check,r.current_computed_label FROM evidence e JOIN reports r ON r.run_id=e.run_id WHERE e.id='ev_1'")
         .fetch_one(&state.pool).await.unwrap();
     assert_eq!((check.as_str(), stored_label.as_str()), ("passed", "draft"));
+    let search: (i64, String) = sqlx::query_as(
+        "SELECT result_count, results_json FROM searches WHERE id='search_imported'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(search.0, 1);
+    assert!(search.1.contains("paywalled"));
+    let envelope_path: String = sqlx::query_scalar("SELECT envelope_path FROM reports WHERE id=?")
+        .bind(&response.report_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let stored: ReportEnvelope =
+        serde_json::from_slice(&state.artifacts.read(&envelope_path).await.unwrap()).unwrap();
+    assert_eq!(stored.assessments.len(), 1);
+    assert_eq!(stored.assessments[0].by, "service");
+}
+
+#[test]
+fn model_summary_cannot_support_a_material_claim() {
+    let mut report = envelope("acq", "ex", "Claim.[^c1]");
+    report.review.level = ReviewLevel::MaterialClaimsReviewed;
+    report.review.records.push(ReviewRecord {
+        by: "worker_self_review".into(),
+        checked: vec!["material_claims".into()],
+        at: Utc::now(),
+    });
+    report.claims[0].review.checked = true;
+    report.claims[0].review.outcome = Some(AssessmentOutcome::Supported);
+    report.sources[0].content_kind = ContentKind::ModelSummary;
+    let (label, reasons) = crate::reports::compute_label(&report);
+    assert_eq!(label, Label::Draft);
+    assert!(reasons.contains(&"material_claim_not_supported:c1".into()));
 }
 
 #[tokio::test]
@@ -338,4 +400,196 @@ async fn bearer_auth_is_required() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+fn managed_request(question: &str) -> CreateRunRequest {
+    CreateRunRequest {
+        brief: ResearchBrief {
+            question: question.into(),
+            decision: "choose".into(),
+            audience: None,
+            locale: Some("US".into()),
+            as_of: Utc::now(),
+            required_questions: vec!["What is supported?".into()],
+            constraints: Value::Null,
+            exclusions: Value::Null,
+            assumptions: Value::Null,
+            depth: Depth::Standard,
+            clarification: Clarification::Assume,
+            scope: Scope::Personal,
+            classification: None,
+            evidence_policy: Value::Null,
+            output: Value::Null,
+        },
+        backend: "exa-agent".into(),
+        backend_config: json!({ "effort": "minimal" }),
+        max_duration_seconds: None,
+        max_cost_usd: None,
+        accept_weaker_limits: false,
+        follow_up_of: None,
+        classification_override_reason: None,
+    }
+}
+
+#[tokio::test]
+async fn managed_run_submission_is_atomic_and_idempotent() {
+    let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
+    let request = managed_request("A");
+    let first = crate::runs::create(&state.pool, "same-key", request.clone())
+        .await
+        .unwrap();
+    let second = crate::runs::create(&state.pool, "same-key", request)
+        .await
+        .unwrap();
+    assert_eq!(first.id, second.id);
+    assert_eq!(first.execution, "queued");
+    assert_eq!(
+        first.brief.classification,
+        Some(Classification::PersonalSensitive)
+    );
+    let (runs, jobs, spend): (i64, i64, i64) = (
+        sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap(),
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap(),
+        sqlx::query_scalar("SELECT SUM(reserved_microusd) FROM spend")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap(),
+    );
+    assert_eq!((runs, jobs, spend), (1, 1, 12_000));
+    let conflict = crate::runs::create(&state.pool, "same-key", managed_request("B")).await;
+    assert!(
+        conflict
+            .unwrap_err()
+            .to_string()
+            .starts_with("idempotency_conflict:")
+    );
+}
+
+#[tokio::test]
+async fn work_confidential_exa_run_is_rejected_before_persistence() {
+    let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
+    let mut request = managed_request("confidential");
+    request.brief.scope = Scope::Work;
+    let error = crate::runs::create(&state.pool, "work-key", request)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("classification_not_permitted:")
+    );
+    let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let spend: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spend")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!((runs, spend), (0, 0));
+}
+
+#[tokio::test]
+async fn stale_attempt_cannot_write_after_job_is_reclaimed() {
+    let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
+    crate::runs::create(&state.pool, "lease-key", managed_request("lease"))
+        .await
+        .unwrap();
+    let first = crate::jobs::claim_next(&state.pool, "heavy", "worker-a", 60)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE jobs SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?")
+        .bind(&first.id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(crate::jobs::reclaim_expired(&state.pool).await.unwrap(), 1);
+    let second = crate::jobs::claim_next(&state.pool, "heavy", "worker-b", 60)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(second.attempt_epoch > first.attempt_epoch);
+    let stale = crate::jobs::complete(&state.pool, &first)
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().starts_with("attempt_epoch_mismatch:"));
+    crate::jobs::complete(&state.pool, &second).await.unwrap();
+}
+
+#[tokio::test]
+async fn context_is_versioned_and_applied_to_new_runs() {
+    let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
+    let first = crate::context::set(
+        &state.pool,
+        Scope::Personal,
+        json!({ "locale": "US-PA", "audience": "Robert" }),
+    )
+    .await
+    .unwrap();
+    let second = crate::context::set(
+        &state.pool,
+        Scope::Personal,
+        json!({ "locale": "US-NY", "audience": "Robert" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!((first.version, second.version), (1, 2));
+    let mut request = managed_request("context");
+    request.brief.locale = None;
+    request.brief.audience = None;
+    let run = crate::runs::create(&state.pool, "context-key", request)
+        .await
+        .unwrap();
+    assert_eq!(run.brief.locale.as_deref(), Some("US-NY"));
+    assert_eq!(run.brief.audience.as_deref(), Some("Robert"));
+    let version: i64 = sqlx::query_scalar("SELECT context_version FROM runs WHERE id=?")
+        .bind(run.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
+}
+
+#[tokio::test]
+async fn expired_paid_submission_requires_reconciliation_not_retry() {
+    let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
+    let run = crate::runs::create(&state.pool, "unknown-key", managed_request("unknown"))
+        .await
+        .unwrap();
+    let claim = crate::jobs::claim_next(&state.pool, "heavy", "worker-a", 60)
+        .await
+        .unwrap()
+        .unwrap();
+    crate::jobs::record_external_task(&state.pool, &claim, "provider-task")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?")
+        .bind(&claim.id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    crate::jobs::reclaim_expired(&state.pool).await.unwrap();
+    assert!(
+        crate::jobs::claim_next(&state.pool, "heavy", "worker-b", 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let current = crate::runs::get(&state.pool, &run.id).await.unwrap();
+    assert_eq!(current.execution, "blocked");
+    assert_eq!(current.blocked_reason.as_deref(), Some("reconcile"));
+    assert_eq!(current.external, "unreconciled");
+    let resolved = crate::runs::reconcile(&state.pool, &run.id, ReconcileRequest::MarkFailed)
+        .await
+        .unwrap();
+    assert_eq!(resolved.execution, "failed");
+    assert_eq!(resolved.blocked_reason, None);
+    assert_eq!(resolved.external, "terminal");
 }
