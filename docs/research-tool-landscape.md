@@ -5,6 +5,18 @@ Prepared for Robert Guss · September 14, 2026
 **Scope:** comparison and design recommendations for discussion, not
 implementation.
 
+**Status note, added September 14, 2026.** The
+[architecture proposal](rust-research-architecture.md) supersedes this
+document's CLI-first shape. It also reverses this document's subscription-first
+recommendation (option A in section 11) in favour of a hosted-first route,
+conditional on the
+[backend comparison](evaluation-harness.md#4-the-backend-comparison-replaces-the-single-exa-task).
+That reversal is a product and economic decision, not a refactor, and is
+recorded for explicit approval in the architecture proposal's decision summary.
+The vendor comparisons, pricing corrections, and the staged retrieval ladder in
+section 6 remain current background; the ladder is now formalised in the
+[source acquisition policy](source-acquisition-policy.md).
+
 ## Executive recommendation
 
 Build a small custom research CLI around **your existing Exa account, the
@@ -486,6 +498,10 @@ hosted backend meets your quality bar for $30–$50/month, a fully custom
 researcher is not automatically the economic winner.
 
 ## 10. Assessment of the attached Perplexity toolbox report
+
+_Note (September 14, 2026): the attachment this section assesses is not in the
+repository. The corrections below cannot be re-checked against it; treat them as
+this document's record of what it said._
 
 Its strongest contribution is separating search, synthesis, extraction,
 crawling, and browser automation. Its prices for several key services are
