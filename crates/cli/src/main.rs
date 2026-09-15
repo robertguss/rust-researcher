@@ -69,6 +69,12 @@ enum Command {
         report_id: String,
         file: PathBuf,
     },
+    Download {
+        report_id: String,
+        #[arg(value_enum)]
+        format: DownloadFormat,
+        output: PathBuf,
+    },
     Cancel {
         run_id: String,
     },
@@ -90,6 +96,12 @@ enum ReconcileAction {
     Adopt,
     MarkFailed,
     Resubmit,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum DownloadFormat {
+    Html,
+    Pdf,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -181,6 +193,21 @@ impl Client {
                 .await?,
         )
         .await
+    }
+
+    async fn get_bytes(&self, path: &str) -> anyhow::Result<bytes::Bytes> {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base.trim_end_matches('/')))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            bail!("HTTP {status}: {}", String::from_utf8_lossy(&bytes));
+        }
+        Ok(bytes)
     }
 
     async fn handle<R: DeserializeOwned>(&self, response: reqwest::Response) -> anyhow::Result<R> {
@@ -344,6 +371,21 @@ async fn main() -> anyhow::Result<()> {
                 .post(&format!("/v1/reports/{report_id}/review"), &request)
                 .await?;
             serde_json::to_value(response)?
+        }
+        Command::Download {
+            report_id,
+            format,
+            output,
+        } => {
+            let format = match format {
+                DownloadFormat::Html => "html",
+                DownloadFormat::Pdf => "pdf",
+            };
+            let bytes = client
+                .get_bytes(&format!("/v1/reports/{report_id}/artifacts/{format}"))
+                .await?;
+            tokio::fs::write(&output, &bytes).await?;
+            serde_json::json!({"path": output, "format": format, "bytes": bytes.len()})
         }
         Command::Cancel { run_id } => {
             let response: research_protocol::RunResponse = client

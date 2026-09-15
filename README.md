@@ -18,9 +18,10 @@ spend reservation, and the thin `research` CLI. Phase 1 foundations include
 versioned standing context, idempotent managed run submission, independent run
 state dimensions, an attempt-epoch-fenced SQLx lease coordinator, explicit
 ambiguous-submission reconciliation, and an Exa Agent worker that durably
-collects provider results and reconciles cost. Rendering, notifications, and
-deployment remain deferred. D-017 authorizes Exa-first development while the
-full backend comparison remains deferred.
+collects provider results and reconciles cost. Immutable report revisions now
+render as sanitized, responsive private HTML and cached PDF artifacts.
+Notifications and deployment remain deferred. D-017 authorizes Exa-first
+development while the full backend comparison remains deferred.
 
 ## Documents
 
@@ -93,6 +94,10 @@ RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
   report REPORT_ID
 RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
   review REPORT_ID review.json
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  download REPORT_ID html report.html
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  download REPORT_ID pdf report.pdf
 ```
 
 `review.json` contains a reviewer identity plus claim IDs mapped to `supported`,
@@ -103,14 +108,16 @@ The service defaults to `sqlite://research.db`, `./artifacts`, and
 `127.0.0.1:3000`. Override these with `DATABASE_URL`, `ARTIFACT_ROOT`, and
 `RESEARCH_LISTEN`; point the CLI elsewhere with `RESEARCH_API_URL`. Provider
 calls spend real money. `cargo test` uses deterministic fakes and never calls
-live Exa. `GET /v1/reports/{id}/artifacts/html` serves authenticated HTML.
+live Exa. `GET /v1/reports/{id}/artifacts/html` and
+`GET /v1/reports/{id}/artifacts/pdf` serve authenticated artifacts. PDF export
+requires `RESEARCH_CHROME_BIN` to name a pinned Chromium executable; generated
+PDFs are content-addressed and cached against the immutable report revision.
 `/r/{run_id}` is the human report page: without proxy configuration it requires
 the bearer token; in deployment, set `RESEARCH_REPORT_PROXY_HOST` to the exact
 private proxy host and the page requires that host in `X-Forwarded-Host`.
 
 ## Next step
 
-Continue the Exa-first vertical slice under D-017: review acquired passages into
-claim-level evidence, render report revisions, add the private read-only report
-page and notification delivery, then pilot it on real work. The backend
-comparison remains a quality-validation task rather than a development gate.
+Continue the Exa-first vertical slice under D-017 with notification delivery and
+a real-work pilot. The backend comparison remains a quality-validation task
+rather than a development gate.

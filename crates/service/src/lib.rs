@@ -12,6 +12,7 @@ pub mod worker;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, header},
     response::{Html, IntoResponse, Response},
@@ -28,7 +29,12 @@ use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
-use std::{collections::BTreeMap, path::Path as FsPath, str::FromStr, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path as FsPath, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
 
 use acquisition::{Resolver, SystemResolver, canonicalize, fetch_live};
 use budget::EXA_CONTENTS_RESERVATION_MICRO_USD;
@@ -46,6 +52,7 @@ pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
     token: Arc<str>,
     report_proxy_host: Option<Arc<str>>,
+    pdf_renderer: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -74,6 +81,9 @@ impl AppState {
             report_proxy_host: std::env::var("RESEARCH_REPORT_PROXY_HOST")
                 .ok()
                 .map(Arc::from),
+            pdf_renderer: std::env::var_os("RESEARCH_CHROME_BIN")
+                .map(PathBuf::from)
+                .map(Arc::new),
         })
     }
 
@@ -84,6 +94,11 @@ impl AppState {
 
     pub fn with_report_proxy_host(mut self, host: impl Into<Arc<str>>) -> Self {
         self.report_proxy_host = Some(host.into());
+        self
+    }
+
+    pub fn with_pdf_renderer(mut self, path: impl Into<PathBuf>) -> Self {
+        self.pdf_renderer = Some(Arc::new(path.into()));
         self
     }
 }
@@ -97,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/reports/{id}", get(get_report))
         .route("/v1/reports/{id}/review", post(review_report))
         .route("/v1/reports/{id}/artifacts/html", get(report_html))
+        .route("/v1/reports/{id}/artifacts/pdf", get(report_pdf))
         .route("/v1/runs", post(create_run))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/provider-result", get(get_provider_result))
@@ -510,6 +526,64 @@ async fn report_html(
 ) -> Result<Response, AppError> {
     authenticate(&headers, &state)?;
     render_report_response(&state, &id).await
+}
+
+async fn report_pdf(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    authenticate(&headers, &state)?;
+    let cached: Option<String> = sqlx::query_scalar(
+        "SELECT content_path FROM report_artifacts WHERE report_id=? AND format='pdf'",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let pdf = if let Some(path) = cached {
+        state.artifacts.read(&path).await?
+    } else {
+        let chrome = state.pdf_renderer.as_ref().ok_or_else(|| {
+            AppError::validation(
+                "renderer_not_configured",
+                "set RESEARCH_CHROME_BIN to a pinned Chromium executable",
+            )
+        })?;
+        let row: (String, String) =
+            sqlx::query_as("SELECT envelope_path,body_path FROM reports WHERE id=?")
+                .bind(&id)
+                .fetch_optional(&state.pool)
+                .await?
+                .ok_or_else(|| AppError::validation("report_not_found", "report does not exist"))?;
+        let envelope = serde_json::from_slice(&state.artifacts.read(&row.0).await?)?;
+        let body = String::from_utf8(state.artifacts.read(&row.1).await?)
+            .map_err(|_| AppError::validation("invalid_report", "report body is not UTF-8"))?;
+        let html = render::report_html(&envelope, &body);
+        let pdf = render::report_pdf(chrome, &html).await?;
+        let (hash, path) = state.artifacts.put(&pdf).await?;
+        sqlx::query("INSERT OR IGNORE INTO report_artifacts (report_id,format,content_hash,content_path,created_at) VALUES (?,'pdf',?,?,?)")
+            .bind(&id)
+            .bind(hash)
+            .bind(path)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&state.pool)
+            .await?;
+        pdf
+    };
+    let mut response = Response::new(Body::from(pdf));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/pdf"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline; filename=research-report.pdf"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 async fn report_page(

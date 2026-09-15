@@ -707,7 +707,7 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     });
     let provider =
         Arc::new(HttpExaProvider::new("fake-key".into(), format!("http://{address}")).unwrap());
-    let (_directory, state) = test_state(provider).await;
+    let (directory, state) = test_state(provider).await;
     let mut request = managed_request("Find the supported answer");
     request.backend_config = json!({"effort": "low"});
     let run = crate::runs::create(&state.pool, "agent-worker", request)
@@ -874,6 +874,58 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
         .await
         .unwrap();
     }
+
+    let fake_chrome = directory.path().join("fake-chrome");
+    tokio::fs::write(
+        &fake_chrome,
+        "#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in --print-to-pdf=*) out=${arg#*=};; esac; done\nprintf '%s' '%PDF-1.4 fake renderer' > \"$out\"\n",
+    )
+    .await
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_chrome, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let pdf_state = state.clone().with_pdf_renderer(&fake_chrome);
+    let response = crate::router(pdf_state.clone())
+        .oneshot(
+            Request::get(format!("/v1/reports/{}/artifacts/pdf", reviewed.report_id))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/pdf"
+    );
+    assert!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .starts_with(b"%PDF-")
+    );
+    tokio::fs::remove_file(&fake_chrome).await.unwrap();
+    let cached = crate::router(pdf_state)
+        .oneshot(
+            Request::get(format!("/v1/reports/{}/artifacts/pdf", reviewed.report_id))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cached.status(), StatusCode::OK);
+    let artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM report_artifacts WHERE report_id=?")
+            .bind(&reviewed.report_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(artifact_count, 1);
 
     let proxy_state = state.clone().with_report_proxy_host("reports.example");
     let denied = crate::router(proxy_state.clone())
