@@ -297,6 +297,13 @@ actually needs cell-level access to them.
 }
 ```
 
+`POST /v1/reports/import` transports this envelope in a JSON wrapper with
+`envelope`, `body_markdown` (the bytes named by `body_markdown_path`), and
+optional `provider_native` JSON. The wrapper is not part of envelope version 1.
+The service verifies the attached hashes and writes the bytes into its private
+content-addressed store; an external CLI cannot safely write server-local
+artifact paths.
+
 Rules:
 
 - Claims are anchored into the Markdown body by stable inline markers (`[^c1]`

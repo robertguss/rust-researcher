@@ -11,9 +11,11 @@ other than a draft.
 
 ## Status
 
-Design and research only. No application has been implemented, deployed, or
-benchmarked yet. The design was reviewed on September 14, 2026 and revised the
-same day; see the design review for what changed and why.
+Phase 0's thin evidence loop is implemented: authenticated Exa search and
+two-rung source acquisition, immutable acquisition/extraction artifacts, report
+envelope import with mechanical evidence checks and service-computed labels,
+spend reservation, and the thin `research` CLI. Managed execution, workers,
+rendering, notifications, and deployment remain deferred as described below.
 
 ## Documents
 
@@ -65,6 +67,24 @@ points to.
 - A versioned `report.json` envelope around one Markdown body, with HTML and PDF
   exports and a Draft/Reviewed label on every format.
 - A read-only report page behind exe.dev's private proxy, linked from Telegram.
+
+## Run the Phase 0 service
+
+```sh
+export RESEARCH_API_TOKEN='choose-a-long-random-token'
+export EXA_API_KEY='from-project-secrets'
+cargo run -p research-service
+
+# In another shell:
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  search "Rust 1.98 release notes"
+```
+
+The service defaults to `sqlite://research.db`, `./artifacts`, and
+`127.0.0.1:3000`. Override these with `DATABASE_URL`, `ARTIFACT_ROOT`, and
+`RESEARCH_LISTEN`; point the CLI elsewhere with `RESEARCH_API_URL`. Provider
+calls spend real money. `cargo test` uses deterministic fakes and never calls
+live Exa.
 
 ## Next step
 
