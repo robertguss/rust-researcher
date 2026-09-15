@@ -632,6 +632,16 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             "usage": {"searches": 0}
         }))
     }
+    async fn contents() -> axum::Json<Value> {
+        axum::Json(json!({
+            "results": [{
+                "url": "https://example.com",
+                "title": "Example",
+                "text": "Official source content supporting a future evidence review. ".repeat(8)
+            }],
+            "costDollars": {"total": 0.001}
+        }))
+    }
 
     let fake = FakeAgent {
         create_body: Arc::new(Mutex::new(None)),
@@ -647,6 +657,7 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
                 Router::new()
                     .route("/agent/runs", post(create))
                     .route("/agent/runs/{id}", axum::routing::get(get))
+                    .route("/contents", post(contents))
                     .with_state(fake),
             )
             .await
@@ -689,6 +700,12 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             .await
             .unwrap();
     assert_eq!(spend, ("reconciled".into(), 25_000));
+    let linked_sources: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_sources WHERE run_id=?")
+        .bind(&run.id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(linked_sources, 1);
     let sent = fake.create_body.lock().await.clone().unwrap();
     assert_eq!(sent["query"], "Find the supported answer");
     assert_eq!(sent["effort"], "low");

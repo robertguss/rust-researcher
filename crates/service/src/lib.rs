@@ -279,6 +279,13 @@ async fn source(
     Json(request): Json<SourceRequest>,
 ) -> Result<Json<SourceResponse>, AppError> {
     authenticate(&headers, &state)?;
+    Ok(Json(acquire_source(&state, request).await?))
+}
+
+pub(crate) async fn acquire_source(
+    state: &AppState,
+    request: SourceRequest,
+) -> Result<SourceResponse, AppError> {
     let initial_url = canonicalize(&request.url)?;
     let operation_id = format!("source_{}", uuid::Uuid::new_v4());
     let reservation = budget::reserve(
@@ -303,7 +310,7 @@ async fn source(
     if let Some(content) = provider {
         let sufficient = content.text.len() >= 200;
         let response = persist_source(
-            &state,
+            state,
             &initial_url,
             &initial_url,
             content.title,
@@ -321,7 +328,7 @@ async fn source(
         )
         .await?;
         if !force_live && sufficient {
-            return Ok(Json(response));
+            return Ok(response);
         }
     }
     let (final_url, raw, text) = fetch_live(&initial_url, state.resolver.clone()).await?;
@@ -333,7 +340,7 @@ async fn source(
     }
     let final_url = canonicalize(final_url.as_str())?;
     let response = persist_source(
-        &state,
+        state,
         &final_url,
         &final_url,
         None,
@@ -346,7 +353,7 @@ async fn source(
         "readability-html-v1",
     )
     .await?;
-    Ok(Json(response))
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]

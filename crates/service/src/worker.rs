@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use research_protocol::{FreshnessClass, SourceRequest};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 use crate::{AppState, budget, error::AppError, exa::AgentRun, jobs};
 
@@ -148,6 +150,10 @@ async fn execute_exa(
         provider_run = state.exa.get_agent_run(&provider_run.id).await?;
     }
 
+    if provider_run.status == "completed" {
+        acquire_grounded_sources(state, claim, &provider_run).await?;
+    }
+
     let bytes = serde_json::to_vec(&provider_run)?;
     let (hash, path) = state.artifacts.put(&bytes).await?;
     let cost = provider_run.reported_cost_microusd();
@@ -187,6 +193,53 @@ async fn execute_exa(
         )
         .await
     }
+}
+
+async fn acquire_grounded_sources(
+    state: &AppState,
+    claim: &jobs::JobClaim,
+    provider_run: &AgentRun,
+) -> Result<(), AppError> {
+    let urls = provider_run
+        .output
+        .get("grounding")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|grounding| grounding.get("citations").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|citation| citation.get("url").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for url in urls {
+        match crate::acquire_source(
+            state,
+            SourceRequest {
+                url: url.clone(),
+                freshness_class: FreshnessClass::Current,
+                require_live: false,
+            },
+        )
+        .await
+        {
+            Ok(source) => {
+                sqlx::query("INSERT OR IGNORE INTO run_sources (run_id,acquisition_id,provenance,inclusion_reason) VALUES (?,?,'exa_grounding','provider citation')")
+                    .bind(&claim.run_id)
+                    .bind(source.acquisition_id)
+                    .execute(&state.pool)
+                    .await?;
+            }
+            Err(error) => {
+                sqlx::query("INSERT INTO events (run_id,event_type,occurred_at,payload_json) VALUES (?,'grounded_source_acquisition_failed',?,?)")
+                    .bind(&claim.run_id)
+                    .bind(Utc::now().to_rfc3339())
+                    .bind(json!({"url": url, "error": error.to_string()}).to_string())
+                    .execute(&state.pool)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn run(state: AppState) {

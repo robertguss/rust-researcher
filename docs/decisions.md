@@ -302,17 +302,38 @@ overturn any of them by editing the entry.
   narrow coordinator cannot satisfy. A replacement must preserve the domain
   state and attempt-epoch contract rather than map it to weaker queue states.
 
+## D-017: Exa-first development waiver
+
+- **Date:** 2026-09-15
+- **Status:** accepted (Robert's explicit direction); supersedes D-003's
+  comparison gate for development order
+- **Decision:** Continue the first production route with Exa Agent now. The
+  12–16-case backend comparison and Claude Code subscription arm are deferred;
+  they no longer block Exa-first implementation. They remain required before a
+  claim that Exa is superior to the alternatives or meets the golden quality
+  threshold.
+- **Alternatives:** Wait for the original homeschool prompt, the remaining real
+  prompts, and Claude Code subscription authentication before implementing a
+  chosen route.
+- **Evidence:** Robert explicitly waived the comparison gate on September
+  15, 2026. One paid `minimal` account probe completed for $0.012 with grounding
+  for both answer items, but citations contained URLs and titles rather than
+  quoted passages. The deterministic adapter suite verifies durable reservation,
+  submission, polling, collection, fencing, and cancellation races.
+- **Reversed by:** Robert restoring comparison-first development, or the pilot
+  showing repeated hard-gate failures. In either case, pause backend-specific
+  expansion and run the deferred comparison.
+
 ## Pending decisions with dates
 
 Everything that could be decided without evidence has been decided. What remains
 waits on Phase 0 results, and deciding it earlier would repeat the original
 plan's mistake of choosing before measuring.
 
-| Decision                             | Needed by                             | Blocked on                                  |
-| ------------------------------------ | ------------------------------------- | ------------------------------------------- |
-| Approve or reject D-003 hosted-first | End of Phase 0                        | Backend comparison results                  |
-| VM size                              | Start of Phase 1                      | Phase 0 mixed-load measurements             |
-| Exa ZDR cell in the D-010 table      | Before first `work` run on Exa search | Phase 0 verification of account ZDR setting |
+| Decision                        | Needed by                             | Blocked on                                  |
+| ------------------------------- | ------------------------------------- | ------------------------------------------- |
+| VM size                         | Start of Phase 1                      | Phase 0 mixed-load measurements             |
+| Exa ZDR cell in the D-010 table | Before first `work` run on Exa search | Phase 0 verification of account ZDR setting |
 
 Setup tasks that follow from accepted decisions (not decisions): create the R2
 bucket, its bucket-lock rules, and the scoped token; store and print the restic
