@@ -15,11 +15,12 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use research_protocol::{
     AccessLevel, BackendContract, ContentKind, ContextDocument, CreateRunRequest, FreshnessClass,
-    ReconcileRequest, ReportImportRequest, ReportImportResponse, RunResponse, Scope, SearchRequest,
-    SearchResponse, SetContextRequest, SourceRequest, SourceResponse, SummaryResponse,
+    ProviderRunResponse, ReconcileRequest, ReportImportRequest, ReportImportResponse, RunResponse,
+    Scope, SearchRequest, SearchResponse, SetContextRequest, SourceRequest, SourceResponse,
+    SummaryResponse,
 };
 use sqlx::{
     SqlitePool,
@@ -84,6 +85,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/reports/import", post(import_report))
         .route("/v1/runs", post(create_run))
         .route("/v1/runs/{id}", get(get_run))
+        .route("/v1/runs/{id}/provider-result", get(get_provider_result))
         .route("/v1/runs/{id}/cancel", post(cancel_run))
         .route("/v1/runs/{id}/reconcile", post(reconcile_run))
         .route("/v1/context/{scope}", get(get_context).put(set_context))
@@ -149,6 +151,33 @@ async fn get_run(
 ) -> Result<Json<RunResponse>, AppError> {
     authenticate(&headers, &state)?;
     Ok(Json(runs::get(&state.pool, &id).await?))
+}
+
+async fn get_provider_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ProviderRunResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    let row: (String, String, String, Option<String>, Option<i64>, String, String) =
+        sqlx::query_as("SELECT provider,external_task_id,status,stop_reason,reported_microusd,collected_at,output_path FROM provider_runs WHERE run_id=? ORDER BY collected_at DESC LIMIT 1")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::validation("provider_result_not_found", "run has no collected provider result"))?;
+    let output = serde_json::from_slice(&state.artifacts.read(&row.6).await?)?;
+    Ok(Json(ProviderRunResponse {
+        run_id: id,
+        provider: row.0,
+        external_task_id: row.1,
+        status: row.2,
+        stop_reason: row.3,
+        reported_cost_usd: row.4.map(usd),
+        collected_at: DateTime::parse_from_rfc3339(&row.5)
+            .map_err(|_| AppError::validation("invalid_timestamp", "stored timestamp is invalid"))?
+            .with_timezone(&Utc),
+        output,
+    }))
 }
 
 async fn cancel_run(

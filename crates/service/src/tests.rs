@@ -613,7 +613,8 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             "status": "running",
             "stopReason": null,
             "output": {"text": "", "structured": null, "grounding": []},
-            "costDollars": {"total": 0.0}
+            "costDollars": {"total": 0.0},
+            "usage": {"searches": 0}
         }))
     }
     async fn get(State(state): State<FakeAgent>) -> axum::Json<Value> {
@@ -627,7 +628,8 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
                 "structured": null,
                 "grounding": [{"field": "text", "citations": [{"url": "https://example.com"}]}]
             },
-            "costDollars": {"total": 0.025}
+            "costDollars": {"total": 0.025},
+            "usage": {"searches": 0}
         }))
     }
 
@@ -677,14 +679,9 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     .unwrap();
     assert_eq!(stored.0, "completed");
     assert_eq!(stored.1, 25_000);
-    assert!(
-        state
-            .artifacts
-            .read(&stored.2)
-            .await
-            .unwrap()
-            .starts_with(b"{")
-    );
+    let native: Value =
+        serde_json::from_slice(&state.artifacts.read(&stored.2).await.unwrap()).unwrap();
+    assert_eq!(native["usage"]["searches"], 0);
     let spend: (String, i64) =
         sqlx::query_as("SELECT state,reported_microusd FROM spend WHERE operation_id=?")
             .bind(&run.id)
@@ -697,5 +694,20 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     assert_eq!(sent["effort"], "low");
     assert!(sent.get("budget").is_none());
     assert_eq!(*fake.polls.lock().await, 1);
+
+    let response = crate::router(state)
+        .oneshot(
+            Request::get(format!("/v1/runs/{}/provider-result", run.id))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: ProviderRunResponse =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(result.reported_cost_usd.as_deref(), Some("0.025000"));
+    assert_eq!(result.output["usage"]["searches"], 0);
     server.abort();
 }

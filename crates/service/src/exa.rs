@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use research_protocol::SearchResult;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use crate::error::AppError;
 
@@ -14,6 +15,8 @@ pub struct AgentRun {
     pub output: Value,
     #[serde(rename = "costDollars", default)]
     pub cost_dollars: Value,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl AgentRun {

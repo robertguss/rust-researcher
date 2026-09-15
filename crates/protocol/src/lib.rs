@@ -438,6 +438,18 @@ pub struct RunResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderRunResponse {
+    pub run_id: String,
+    pub provider: String,
+    pub external_task_id: String,
+    pub status: String,
+    pub stop_reason: Option<String>,
+    pub reported_cost_usd: Option<String>,
+    pub collected_at: DateTime<Utc>,
+    pub output: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ReconcileRequest {
     Adopt { external_task_id: String },
