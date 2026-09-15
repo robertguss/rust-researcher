@@ -360,6 +360,23 @@ fn model_summary_cannot_support_a_material_claim() {
     assert!(reasons.contains(&"material_claim_not_supported:c1".into()));
 }
 
+#[test]
+fn reviewer_cannot_mark_a_material_claim_supported_without_evidence() {
+    let mut report = envelope("acq", "ex", "Claim.[^c1]");
+    report.review.level = ReviewLevel::MaterialClaimsReviewed;
+    report.review.records.push(ReviewRecord {
+        by: "reviewer".into(),
+        checked: vec!["c1".into()],
+        at: Utc::now(),
+    });
+    report.claims[0].evidence.clear();
+    report.claims[0].review.checked = true;
+    report.claims[0].review.outcome = Some(AssessmentOutcome::Supported);
+    let (label, reasons) = crate::reports::compute_label(&report);
+    assert_eq!(label, Label::Draft);
+    assert!(reasons.contains(&"material_claim_not_supported:c1".into()));
+}
+
 #[tokio::test]
 async fn reextraction_leaves_old_locator_valid() {
     let (_directory, state) = test_state(Arc::new(UnusedExa)).await;
@@ -625,7 +642,31 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
             "stopReason": "schema_satisfied",
             "output": {
                 "text": "A collected answer",
-                "structured": null,
+                "structured": {
+                    "answerMarkdown": "A collected answer",
+                    "claims": [
+                        {
+                            "id": "fact",
+                            "kind": "observation",
+                            "text": "The source discusses future evidence review.",
+                            "material": true,
+                            "evidence": [{
+                                "url": "https://example.com",
+                                "quote": "Official source content supporting a future evidence review."
+                            }]
+                        },
+                        {
+                            "id": "wrong-conclusion",
+                            "kind": "recommendation",
+                            "text": "Buy an unrelated product.",
+                            "material": true,
+                            "evidence": [{
+                                "url": "https://example.com",
+                                "quote": "Official source content supporting a future evidence review."
+                            }]
+                        }
+                    ]
+                },
                 "grounding": [{"field": "text", "citations": [{"url": "https://example.com"}]}]
             },
             "costDollars": {"total": 0.025},
@@ -720,6 +761,7 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     assert_eq!(sent["query"], "Find the supported answer");
     assert_eq!(sent["effort"], "low");
     assert!(sent.get("budget").is_none());
+    assert_eq!(sent["outputSchema"]["type"], "object");
     assert_eq!(*fake.polls.lock().await, 1);
 
     let report_id = current.current_report_id.unwrap();
@@ -737,6 +779,59 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(report.envelope.label, Some(Label::Draft));
     assert!(report.body_markdown.contains("A collected answer"));
+    assert_eq!(report.envelope.claims.len(), 2);
+    assert_eq!(report.envelope.evidence.len(), 2);
+    assert!(
+        report
+            .envelope
+            .claims
+            .iter()
+            .all(|claim| !claim.review.checked)
+    );
+    assert!(
+        report.envelope.assessments[0]
+            .reasons
+            .contains(&"material_claim_not_supported:provider-claim-2".into())
+    );
+
+    let response = crate::router(state.clone())
+        .oneshot(
+            Request::post(format!("/v1/reports/{report_id}/review"))
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "reviewer": "test-reviewer",
+                        "outcomes": {
+                            "provider-claim-1": "supported",
+                            "provider-claim-2": "unsupported"
+                        },
+                        "notes": {
+                            "provider-claim-2": "The real quote does not support the purchasing conclusion"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let reviewed: ReportImportResponse =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(reviewed.revision, 2);
+    assert_eq!(reviewed.label, Label::NeedsReview);
+    let revisions: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT revision,current_computed_label FROM reports WHERE run_id=? ORDER BY revision",
+    )
+    .bind(&run.id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        revisions,
+        vec![(1, "draft".into()), (2, "needs_review".into())]
+    );
 
     let response = crate::router(state)
         .oneshot(

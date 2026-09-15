@@ -65,6 +65,10 @@ enum Command {
     Report {
         report_id: String,
     },
+    Review {
+        report_id: String,
+        file: PathBuf,
+    },
     Cancel {
         run_id: String,
     },
@@ -331,6 +335,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Report { report_id } => {
             let response: research_protocol::StoredReportResponse =
                 client.get(&format!("/v1/reports/{report_id}")).await?;
+            serde_json::to_value(response)?
+        }
+        Command::Review { report_id, file } => {
+            let request: research_protocol::ReviewReportRequest =
+                serde_json::from_slice(&tokio::fs::read(&file).await?)?;
+            let response: research_protocol::ReportImportResponse = client
+                .post(&format!("/v1/reports/{report_id}/review"), &request)
+                .await?;
             serde_json::to_value(response)?
         }
         Command::Cancel { run_id } => {

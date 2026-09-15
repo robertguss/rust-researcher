@@ -1,7 +1,7 @@
 use chrono::Utc;
 use research_protocol::{
     AssessmentOutcome, ClaimKind, EvidenceRelation, Label, MechanicalCheck, ReportEnvelope,
-    ReportImportRequest, ReportImportResponse, ReviewLevel,
+    ReportImportRequest, ReportImportResponse, ReviewLevel, ReviewRecord, ReviewReportRequest,
 };
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -88,8 +88,28 @@ pub async fn import(
     .execute(&mut *tx)
     .await?;
     for evidence in &request.envelope.evidence {
+        let existing: Option<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT run_id,extraction_id,relation,locator_json,quoted_text,normalisation FROM evidence WHERE id=?",
+        )
+        .bind(&evidence.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let expected = (
+            request.envelope.run_id.clone(),
+            evidence.extraction.clone(),
+            relation_name(&evidence.relation).to_owned(),
+            serde_json::to_string(&evidence.locator)?,
+            evidence.quote.clone(),
+            evidence.normalisation.clone(),
+        );
+        if existing.as_ref().is_some_and(|stored| stored != &expected) {
+            return Err(AppError::conflict(
+                "evidence_id_conflict",
+                "evidence ID already exists with different immutable content",
+            ));
+        }
         sqlx::query(
-            "INSERT INTO evidence (id, run_id, extraction_id, relation, locator_json, quoted_text, normalisation, mechanical_check) VALUES (?, ?, ?, ?, ?, ?, ?, 'passed')",
+            "INSERT OR IGNORE INTO evidence (id, run_id, extraction_id, relation, locator_json, quoted_text, normalisation, mechanical_check) VALUES (?, ?, ?, ?, ?, ?, ?, 'passed')",
         )
         .bind(&evidence.id)
         .bind(&request.envelope.run_id)
@@ -173,6 +193,97 @@ pub async fn import(
         label,
         reasons,
     })
+}
+
+pub async fn review(
+    pool: &SqlitePool,
+    store: &ArtifactStore,
+    report_id: &str,
+    request: ReviewReportRequest,
+) -> Result<ReportImportResponse, AppError> {
+    if request.reviewer.trim().is_empty() || request.outcomes.is_empty() {
+        return Err(AppError::validation(
+            "invalid_review",
+            "reviewer and at least one claim outcome are required",
+        ));
+    }
+    let (envelope_path, body_path): (String, String) = sqlx::query_as(
+        "SELECT p.envelope_path,p.body_path FROM reports p JOIN runs r ON r.id=p.run_id WHERE p.id=? AND r.current_report_id=p.id",
+    )
+            .bind(report_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::conflict("report_not_current", "only the current report revision can be reviewed"))?;
+    let mut envelope: ReportEnvelope = serde_json::from_slice(&store.read(&envelope_path).await?)?;
+    let body_markdown = String::from_utf8(store.read(&body_path).await?)
+        .map_err(|_| AppError::validation("invalid_report", "report body is not UTF-8"))?;
+    let claim_ids = envelope
+        .claims
+        .iter()
+        .map(|claim| claim.id.as_str())
+        .collect::<HashSet<_>>();
+    if request
+        .outcomes
+        .keys()
+        .any(|id| !claim_ids.contains(id.as_str()))
+    {
+        return Err(AppError::validation(
+            "unknown_claim",
+            "review references a claim not present in the report",
+        ));
+    }
+    let now = Utc::now();
+    let checked = request.outcomes.keys().cloned().collect::<Vec<_>>();
+    for claim in &mut envelope.claims {
+        if let Some(outcome) = request.outcomes.get(&claim.id) {
+            claim.review.checked = true;
+            claim.review.by = Some(request.reviewer.clone());
+            claim.review.note = request.notes.get(&claim.id).cloned();
+            claim.review.outcome = Some(outcome.clone());
+        }
+    }
+    let all_material_reviewed = envelope
+        .claims
+        .iter()
+        .filter(|claim| claim.material)
+        .all(|claim| claim.review.checked);
+    envelope.review.level = if all_material_reviewed {
+        ReviewLevel::MaterialClaimsReviewed
+    } else {
+        ReviewLevel::Mechanical
+    };
+    envelope.review.records.push(ReviewRecord {
+        by: request.reviewer,
+        checked,
+        at: now,
+    });
+    if all_material_reviewed {
+        for question in &mut envelope.completion.required_questions {
+            if question.q == "Material claims checked against acquired passages" {
+                question.answered = true;
+            }
+        }
+    }
+    envelope.revision += 1;
+    envelope.supersedes = Some(envelope.revision - 1);
+    envelope.label = None;
+    envelope.assessments.clear();
+    envelope.artifacts.clear();
+    let provider_native = if let Some(reference) = &envelope.provider_native {
+        Some(serde_json::from_slice(&store.read(&reference.path).await?)?)
+    } else {
+        None
+    };
+    import(
+        pool,
+        store,
+        ReportImportRequest {
+            envelope,
+            body_markdown,
+            provider_native,
+        },
+    )
+    .await
 }
 
 async fn validate_structure(
@@ -403,7 +514,8 @@ pub fn compute_label(envelope: &ReportEnvelope) -> (Label, Vec<String>) {
                     })
             })
         });
-        if unsuitable_source
+        if claim.evidence.is_empty()
+            || unsuitable_source
             || !claim.review.checked
             || !matches!(
                 claim.review.outcome,

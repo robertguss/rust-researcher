@@ -91,7 +91,13 @@ RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
   status RUN_ID
 RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
   report REPORT_ID
+RESEARCH_API_TOKEN="$RESEARCH_API_TOKEN" cargo run -p research-cli -- \
+  review REPORT_ID review.json
 ```
+
+`review.json` contains a reviewer identity plus claim IDs mapped to `supported`,
+`qualified`, `unsupported`, `contradicted`, or `stale`. Review creates a new
+immutable report revision; it never edits the draft in place.
 
 The service defaults to `sqlite://research.db`, `./artifacts`, and
 `127.0.0.1:3000`. Override these with `DATABASE_URL`, `ARTIFACT_ROOT`, and

@@ -105,6 +105,14 @@ pub struct StoredReportResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewReportRequest {
+    pub reviewer: String,
+    pub outcomes: BTreeMap<String, AssessmentOutcome>,
+    #[serde(default)]
+    pub notes: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportEnvelope {
     pub schema_version: String,
     pub run_id: String,

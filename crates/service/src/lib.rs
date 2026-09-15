@@ -18,9 +18,9 @@ use axum::{
 use chrono::{DateTime, Datelike, Utc};
 use research_protocol::{
     AccessLevel, BackendContract, ContentKind, ContextDocument, CreateRunRequest, FreshnessClass,
-    ProviderRunResponse, ReconcileRequest, ReportImportRequest, ReportImportResponse, RunResponse,
-    Scope, SearchRequest, SearchResponse, SetContextRequest, SourceRequest, SourceResponse,
-    StoredReportResponse, SummaryResponse,
+    ProviderRunResponse, ReconcileRequest, ReportImportRequest, ReportImportResponse,
+    ReviewReportRequest, RunResponse, Scope, SearchRequest, SearchResponse, SetContextRequest,
+    SourceRequest, SourceResponse, StoredReportResponse, SummaryResponse,
 };
 use sqlx::{
     SqlitePool,
@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sources/{id}", get(get_source))
         .route("/v1/reports/import", post(import_report))
         .route("/v1/reports/{id}", get(get_report))
+        .route("/v1/reports/{id}/review", post(review_report))
         .route("/v1/runs", post(create_run))
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/provider-result", get(get_provider_result))
@@ -471,6 +472,18 @@ async fn get_report(
         envelope,
         body_markdown,
     }))
+}
+
+async fn review_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<ReviewReportRequest>,
+) -> Result<Json<ReportImportResponse>, AppError> {
+    authenticate(&headers, &state)?;
+    Ok(Json(
+        reports::review(&state.pool, &state.artifacts, &id, request).await?,
+    ))
 }
 
 async fn backends(

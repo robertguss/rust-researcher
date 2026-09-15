@@ -2,13 +2,15 @@ use std::time::Duration;
 
 use chrono::Utc;
 use research_protocol::{
-    ArtifactRef, Assumptions, Claim, ClaimKind, ClaimReview, Completion, FreshnessClass, Label,
-    ProducedBy, ReportEnvelope, ReportImportRequest, ReportSearch, ReportSource, RequiredQuestion,
-    Review, ReviewLevel, SourceRequest, SourceResponse,
+    ArtifactRef, Assumptions, Claim, ClaimKind, ClaimReview, Completion, Evidence,
+    EvidenceRelation, FreshnessClass, Label, ProducedBy, ReportEnvelope, ReportImportRequest,
+    ReportSearch, ReportSource, RequiredQuestion, Review, ReviewLevel, SourceRequest,
+    SourceResponse,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{AppState, budget, error::AppError, exa::AgentRun, jobs};
 
@@ -130,12 +132,13 @@ async fn execute_exa(
         "effort": effort,
         "metadata": {"research_run_id": claim.run_id}
     });
-    if let Some(value) = config.get("systemPrompt") {
-        request["systemPrompt"] = value.clone();
-    }
-    if let Some(value) = config.get("outputSchema") {
-        request["outputSchema"] = value.clone();
-    }
+    request["systemPrompt"] = config.get("systemPrompt").cloned().unwrap_or_else(|| {
+        Value::String("Return concise research with material claims separated. For every evidence item, copy an exact passage from the cited page; never paraphrase inside quote. Unsupported claims must have an empty evidence array.".into())
+    });
+    request["outputSchema"] = config
+        .get("outputSchema")
+        .cloned()
+        .unwrap_or_else(default_output_schema);
     if matches!(effort, "auto" | "max") {
         request["budget"] = json!({
             "maxCostDollars": max_cost.unwrap_or(5_000_000) as f64 / 1_000_000.0
@@ -198,12 +201,46 @@ async fn execute_exa(
     }
 }
 
+fn default_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["answerMarkdown", "claims"],
+        "properties": {
+            "answerMarkdown": {"type": "string"},
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "kind", "text", "material", "evidence"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["observation", "inference", "recommendation"]},
+                        "text": {"type": "string"},
+                        "material": {"type": "boolean"},
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["url", "quote"],
+                                "properties": {
+                                    "url": {"type": "string"},
+                                    "quote": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 async fn acquire_grounded_sources(
     state: &AppState,
     claim: &jobs::JobClaim,
     provider_run: &AgentRun,
 ) -> Result<Vec<SourceResponse>, AppError> {
-    let urls = provider_run
+    let mut urls = provider_run
         .output
         .get("grounding")
         .and_then(Value::as_array)
@@ -214,6 +251,21 @@ async fn acquire_grounded_sources(
         .filter_map(|citation| citation.get("url").and_then(Value::as_str))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+    if let Some(claims) = provider_run
+        .output
+        .get("structured")
+        .and_then(|structured| structured.get("claims"))
+        .and_then(Value::as_array)
+    {
+        for url in claims
+            .iter()
+            .filter_map(|claim| claim.get("evidence").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|evidence| evidence.get("url").and_then(Value::as_str))
+        {
+            urls.insert(url.to_owned());
+        }
+    }
     let mut acquired = Vec::new();
     for url in urls {
         match crate::acquire_source(
@@ -254,18 +306,132 @@ async fn publish_provider_draft(
     provider_bytes: &[u8],
     sources: Vec<SourceResponse>,
 ) -> Result<(), AppError> {
-    let text = provider_run
+    let fallback_text = provider_run
         .output
         .get("text")
         .and_then(Value::as_str)
         .unwrap_or("Provider completed without textual output.");
-    let body = format!("# Draft research result\n\n{text}\n\n[^provider-output]");
+    let structured = provider_run.output.get("structured");
+    let answer = structured
+        .and_then(|value| value.get("answerMarkdown"))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_text);
     let (brief, backend_config, context_version): (String, String, Option<i64>) = sqlx::query_as(
         "SELECT brief_json,backend_config_json,context_version FROM runs WHERE id=?",
     )
     .bind(&claim.run_id)
     .fetch_one(&state.pool)
     .await?;
+    let mut source_by_url = HashMap::new();
+    for (index, source) in sources.iter().enumerate() {
+        if let Ok(url) = crate::acquisition::canonicalize(&source.canonical_url) {
+            source_by_url.insert(url, index);
+        }
+        if let Ok(url) = crate::acquisition::canonicalize(&source.final_url) {
+            source_by_url.insert(url, index);
+        }
+    }
+    let mut evidence = Vec::new();
+    let mut claims = Vec::new();
+    if let Some(provider_claims) = structured
+        .and_then(|value| value.get("claims"))
+        .and_then(Value::as_array)
+    {
+        for (claim_index, provider_claim) in provider_claims.iter().enumerate() {
+            let claim_id = format!("provider-claim-{}", claim_index + 1);
+            let mut claim_evidence = Vec::new();
+            if let Some(items) = provider_claim.get("evidence").and_then(Value::as_array) {
+                for (evidence_index, item) in items.iter().enumerate() {
+                    let Some(url) = item.get("url").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(quote) = item.get("quote").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Ok(canonical_url) = crate::acquisition::canonicalize(url) else {
+                        continue;
+                    };
+                    let Some(source) = source_by_url
+                        .get(&canonical_url)
+                        .and_then(|index| sources.get(*index))
+                    else {
+                        continue;
+                    };
+                    if quote.trim().is_empty()
+                        || !normalise(&source.text).contains(&normalise(quote))
+                    {
+                        continue;
+                    }
+                    let evidence_id = format!(
+                        "provider-evidence-{}-{}",
+                        claim_index + 1,
+                        evidence_index + 1
+                    );
+                    claim_evidence.push(evidence_id.clone());
+                    evidence.push(Evidence {
+                        id: evidence_id,
+                        extraction: source.extraction_id.clone(),
+                        relation: EvidenceRelation::Supports,
+                        locator: json!({"kind": "exact_quote", "url": canonical_url}),
+                        quote: quote.into(),
+                        normalisation: "whitespace,unicode-nfkc".into(),
+                        mechanical_check: None,
+                    });
+                }
+            }
+            claims.push(Claim {
+                id: claim_id,
+                kind: match provider_claim.get("kind").and_then(Value::as_str) {
+                    Some("recommendation") => ClaimKind::Recommendation,
+                    Some("inference") => ClaimKind::Inference,
+                    _ => ClaimKind::Observation,
+                },
+                text: provider_claim
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Provider emitted an empty claim")
+                    .into(),
+                material: provider_claim
+                    .get("material")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                evidence: claim_evidence,
+                derivation: None,
+                review: ClaimReview {
+                    checked: false,
+                    by: None,
+                    note: Some(
+                        "Exact quotations verified mechanically; semantic support not yet reviewed"
+                            .into(),
+                    ),
+                    outcome: None,
+                },
+            });
+        }
+    }
+    if claims.is_empty() {
+        claims.push(Claim {
+            id: "provider-claim-1".into(),
+            kind: ClaimKind::Observation,
+            text: fallback_text.into(),
+            material: true,
+            evidence: vec![],
+            derivation: None,
+            review: ClaimReview {
+                checked: false,
+                by: None,
+                note: Some("Provider did not return structured claims".into()),
+                outcome: None,
+            },
+        });
+    }
+    let markers = claims
+        .iter()
+        .map(|claim| format!("[^{}]", claim.id))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!("# Draft research result\n\n{answer}\n\n## Claim index\n\n{markers}");
+
     let mut report_sources = Vec::new();
     for source in sources {
         let (retrieved_at, origin_group): (String, String) = sqlx::query_as(
@@ -307,21 +473,8 @@ async fn publish_provider_draft(
         assumptions: Assumptions::default(),
         body_markdown_path: "report.md".into(),
         body_hash,
-        claims: vec![Claim {
-            id: "provider-output".into(),
-            kind: ClaimKind::Observation,
-            text: text.into(),
-            material: true,
-            evidence: vec![],
-            derivation: None,
-            review: ClaimReview {
-                checked: false,
-                by: None,
-                note: Some("Provider grounding contains URLs but no checked passages".into()),
-                outcome: None,
-            },
-        }],
-        evidence: vec![],
+        claims,
+        evidence,
         assessments: vec![],
         sources: report_sources,
         searches: Vec::<ReportSearch>::new(),
@@ -360,6 +513,15 @@ async fn publish_provider_draft(
 
 fn sha256(value: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(value)))
+}
+
+fn normalise(value: &str) -> String {
+    value
+        .nfkc()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub async fn run(state: AppState) {
