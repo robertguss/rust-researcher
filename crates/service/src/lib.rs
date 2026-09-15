@@ -186,6 +186,17 @@ async fn cancel_run(
     Path(id): Path<String>,
 ) -> Result<Json<RunResponse>, AppError> {
     authenticate(&headers, &state)?;
+    let active: Option<(String, String)> = sqlx::query_as(
+        "SELECT j.id,j.external_task_id FROM jobs j JOIN runs r ON r.id=j.run_id WHERE r.id=? AND r.execution='running' AND j.state='running' AND j.external_task_id IS NOT NULL",
+    )
+    .bind(&id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if let Some((job_id, external_id)) = active {
+        let provider_run = state.exa.cancel_agent_run(&external_id).await?;
+        worker::record_control_result(&state, &id, &job_id, &provider_run).await?;
+        return Ok(Json(runs::get(&state.pool, &id).await?));
+    }
     Ok(Json(runs::cancel(&state.pool, &id).await?))
 }
 

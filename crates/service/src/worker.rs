@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::{AppState, budget, error::AppError, jobs};
+use crate::{AppState, budget, error::AppError, exa::AgentRun, jobs};
 
 const LEASE_SECONDS: i64 = 60;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -17,6 +17,75 @@ pub async fn process_one(state: &AppState, owner: &str) -> Result<bool, AppError
         return Err(error);
     }
     Ok(true)
+}
+
+pub async fn record_control_result(
+    state: &AppState,
+    run_id: &str,
+    job_id: &str,
+    provider_run: &AgentRun,
+) -> Result<(), AppError> {
+    let bytes = serde_json::to_vec(provider_run)?;
+    let (hash, path) = state.artifacts.put(&bytes).await?;
+    let cost = provider_run.reported_cost_microusd();
+    let reservation_id: String = sqlx::query_scalar(
+        "SELECT id FROM spend WHERE operation_id=? AND state='reserved' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .fetch_one(&state.pool)
+    .await?;
+    budget::reconcile(
+        &state.pool,
+        &budget::Reservation { id: reservation_id },
+        cost,
+    )
+    .await?;
+    let now = Utc::now().to_rfc3339();
+    let execution = match provider_run.status.as_str() {
+        "completed" => "succeeded",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let job_state = match execution {
+        "succeeded" => "succeeded",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("INSERT INTO provider_runs (id,run_id,job_id,provider,external_task_id,status,stop_reason,output_hash,output_path,reported_microusd,collected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,external_task_id) DO NOTHING")
+        .bind(format!("provider_run_{}", uuid::Uuid::new_v4()))
+        .bind(run_id)
+        .bind(job_id)
+        .bind("exa-agent")
+        .bind(&provider_run.id)
+        .bind(&provider_run.status)
+        .bind(&provider_run.stop_reason)
+        .bind(hash)
+        .bind(path)
+        .bind(cost)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE jobs SET state=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND state='running'")
+        .bind(job_state)
+        .bind(&now)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE runs SET execution=?,external='terminal',updated_at=? WHERE id=? AND execution='running'")
+        .bind(execution)
+        .bind(&now)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO events (run_id,event_type,occurred_at,payload_json) VALUES (?,'external_cancellation_result',?,?)")
+        .bind(run_id)
+        .bind(&now)
+        .bind(json!({"provider_status": provider_run.status}).to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn execute_exa(

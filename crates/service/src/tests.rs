@@ -24,7 +24,7 @@ use crate::{
     acquisition::{Resolver, resolve_destination},
     budget,
     error::AppError,
-    exa::{ExaContent, ExaProvider, HttpExaProvider, ProviderResponse},
+    exa::{AgentRun, ExaContent, ExaProvider, HttpExaProvider, ProviderResponse},
 };
 
 struct UnusedExa;
@@ -710,4 +710,82 @@ async fn exa_agent_worker_submits_polls_collects_and_reconciles() {
     assert_eq!(result.reported_cost_usd.as_deref(), Some("0.025000"));
     assert_eq!(result.output["usage"]["searches"], 0);
     server.abort();
+}
+
+struct CancelReturnsCompleted;
+
+#[async_trait]
+impl ExaProvider for CancelReturnsCompleted {
+    async fn search(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<ProviderResponse<Vec<SearchResult>>, AppError> {
+        panic!("unexpected search")
+    }
+
+    async fn contents(&self, _: &str) -> Result<ProviderResponse<Option<ExaContent>>, AppError> {
+        panic!("unexpected contents")
+    }
+
+    async fn cancel_agent_run(&self, id: &str) -> Result<AgentRun, AppError> {
+        assert_eq!(id, "already-completed");
+        Ok(AgentRun {
+            id: id.into(),
+            status: "completed".into(),
+            stop_reason: Some("schema_satisfied".into()),
+            output: json!({"text": "The provider completed before cancellation."}),
+            cost_dollars: json!({"total": 0.012}),
+            extra: BTreeMap::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancellation_race_preserves_remote_completion_and_charge() {
+    let (_directory, state) = test_state(Arc::new(CancelReturnsCompleted)).await;
+    let run = crate::runs::create(
+        &state.pool,
+        "cancel-race",
+        managed_request("finish quickly"),
+    )
+    .await
+    .unwrap();
+    let claim = crate::jobs::claim_next(&state.pool, "heavy", "worker-a", 60)
+        .await
+        .unwrap()
+        .unwrap();
+    crate::jobs::record_external_task(&state.pool, &claim, "already-completed")
+        .await
+        .unwrap();
+
+    let response = crate::router(state.clone())
+        .oneshot(
+            Request::post(format!("/v1/runs/{}/cancel", run.id))
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: RunResponse =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(result.execution, "succeeded");
+    assert_eq!(result.external, "terminal");
+    let spend: (String, i64) =
+        sqlx::query_as("SELECT state,reported_microusd FROM spend WHERE operation_id=?")
+            .bind(&run.id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(spend, ("reconciled".into(), 12_000));
+    let provider_status: String =
+        sqlx::query_scalar("SELECT status FROM provider_runs WHERE run_id=?")
+            .bind(run.id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(provider_status, "completed");
 }
